@@ -36,6 +36,11 @@ object Store {
         get() = prefs.getString("dir", null)
         set(v) { prefs.edit().putString("dir", v).apply() }
 
+    /** 首页当前显示的聊天对象 */
+    var currentPeer: String?
+        get() = prefs.getString("cur", null)
+        set(v) { prefs.edit().putString("cur", v).apply() }
+
     var port: Int
         get() = prefs.getInt("port", 0)
         set(v) { prefs.edit().putInt("port", v).apply() }
