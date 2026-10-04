@@ -30,10 +30,7 @@ object Net {
             s.connect(InetSocketAddress(InetAddress.getByName(peer.host), peer.port), 6000)
             s.soTimeout = 60000
             val out = s.getOutputStream()
-            header.put("v", 1).put("dev", Store.deviceId).put("devName", Store.deviceName).put("port", Hub.port)
-            val hb = header.toString().toByteArray(Charsets.UTF_8)
-            out.write(ByteBuffer.allocate(4).putInt(hb.size).array())
-            out.write(hb)
+            writeHeader(out, header)
             if (open != null) {
                 open().use { ins ->
                     val buf = ByteArray(BUF)
@@ -52,6 +49,50 @@ object Net {
         } finally {
             try { s.close() } catch (_: Exception) {}
         }
+    }
+
+    private fun writeHeader(out: java.io.OutputStream, header: JSONObject) {
+        header.put("v", 1).put("dev", Store.deviceId).put("devName", Store.deviceName).put("port", Hub.port)
+        val hb = header.toString().toByteArray(Charsets.UTF_8)
+        out.write(ByteBuffer.allocate(4).putInt(hb.size).array())
+        out.write(hb)
+        out.flush()
+    }
+
+    /** 轻量探测：能连上且对方回报的设备 id 一致，才算在线 */
+    fun ping(p: Peer): Boolean = try {
+        Socket().use { s ->
+            s.connect(InetSocketAddress(InetAddress.getByName(p.host), p.port), 900)
+            s.soTimeout = 1500
+            writeHeader(s.getOutputStream(), JSONObject().put("type", "ping"))
+            val ins = s.getInputStream()
+            if (ins.read() != 1) {
+                false
+            } else {
+                val n = ins.read()
+                if (n <= 0) {
+                    false
+                } else {
+                    val b = ByteArray(n)
+                    DataInputStream(ins).readFully(b)
+                    String(b, Charsets.UTF_8) == p.id
+                }
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** 本机 Wi-Fi(wlan) 网卡上的局域网 IPv4；没连 Wi-Fi 返回 null（开着 VPN 也能正确判断） */
+    fun wifiIp(): String? = try {
+        Collections.list(NetworkInterface.getNetworkInterfaces())
+            .filter { it.isUp && !it.isLoopback && it.name.startsWith("wlan") }
+            .sortedBy { it.name }
+            .flatMap { Collections.list(it.inetAddresses) }
+            .firstOrNull { it is Inet4Address && !it.isLoopbackAddress }
+            ?.hostAddress
+    } catch (e: Exception) {
+        null
     }
 
     fun localIps(): List<String> = try {
@@ -114,12 +155,21 @@ object Server {
                 val host = s.inetAddress.hostAddress ?: return
                 Hub.upsertPeer(pid, h.optString("devName"), host, h.getInt("port"))
                 when (h.getString("type")) {
+                    "ping" -> {
+                        out.write(1)
+                        val ib = Store.deviceId.toByteArray(Charsets.UTF_8)
+                        out.write(ib.size)
+                        out.write(ib)
+                    }
                     "hello" -> {
+                        Hub.helloCount++
                         Hub.hellos.tryEmit(pid)
                         out.write(1)
                     }
                     "text" -> {
-                        Hub.addMsg(Msg(newId(), pid, false, Kind.TEXT, now(), text = h.getString("text")))
+                        Hub.addMsg(
+                            Msg(newId(), pid, false, Kind.TEXT, now(), text = h.getString("text"), read = Hub.openPeer == pid)
+                        )
                         out.write(1)
                     }
                     "file" -> receiveFile(pid, h, inp, out)
@@ -140,7 +190,7 @@ object Server {
             Msg(
                 id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
                 name = title, file = fname, size = size, state = MsgState.RECEIVING,
-                pkg = h.optString("pkg"), ver = h.optString("ver")
+                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.openPeer == pid
             )
         )
         var saved: Saver.Out? = null
