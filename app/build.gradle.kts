@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// CI 每次构建的序号（GitHub Actions 自动递增），本地构建则为 0
+val buildNo = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+
 android {
     namespace = "com.hulian.transfer"
     compileSdk = 34
@@ -12,8 +15,8 @@ android {
         applicationId = "com.hulian.transfer"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 1000 + buildNo
+        versionName = "0.2.$buildNo"
     }
 
     // 固定的调试签名：每次 CI 构建签名一致，才能直接覆盖安装升级
