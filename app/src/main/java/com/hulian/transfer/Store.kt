@@ -41,6 +41,11 @@ object Store {
         get() = prefs.getString("cur", null)
         set(v) { prefs.edit().putString("cur", v).apply() }
 
+    /** 是否已经做过首次权限说明/申请 */
+    var permsAsked: Boolean
+        get() = prefs.getBoolean("permsAsked", false)
+        set(v) { prefs.edit().putBoolean("permsAsked", v).apply() }
+
     var port: Int
         get() = prefs.getInt("port", 0)
         set(v) { prefs.edit().putInt("port", v).apply() }
@@ -57,7 +62,7 @@ object Store {
                     .put("kind", m.kind.name).put("time", m.time).put("text", m.text)
                     .put("name", m.name).put("file", m.file).put("size", m.size)
                     .put("done", m.done).put("state", m.state.name).put("uri", m.uri)
-                    .put("pkg", m.pkg).put("ver", m.ver).put("err", m.error)
+                    .put("pkg", m.pkg).put("ver", m.ver).put("err", m.error).put("rd", m.read)
             )
         }
         writeAtomic(msgFile, arr.toString())
@@ -78,7 +83,8 @@ object Store {
                 kind = Kind.valueOf(o.getString("kind")), time = o.getLong("time"),
                 text = o.optString("text"), name = o.optString("name"), file = o.optString("file"),
                 size = o.optLong("size"), done = o.optLong("done"), state = st,
-                uri = o.optString("uri"), pkg = o.optString("pkg"), ver = o.optString("ver"), error = err
+                uri = o.optString("uri"), pkg = o.optString("pkg"), ver = o.optString("ver"), error = err,
+                read = o.optBoolean("rd", true)
             )
         }
     } catch (e: Exception) {
