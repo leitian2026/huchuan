@@ -11,7 +11,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
 
-/** 全局状态中心：设备列表、聊天消息、发送逻辑 */
+/** 全局状态中心：设备列表、聊天消息、发送逻辑、在线检测 */
 object Hub {
     lateinit var app: Context
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -21,36 +21,32 @@ object Hub {
     private val _peers = MutableStateFlow<Map<String, Peer>>(emptyMap())
     val peers = _peers.asStateFlow()
 
-    private val _current = MutableStateFlow<String?>(null)
-    val current = _current.asStateFlow()
-
-    fun setCurrent(id: String?) {
-        _current.value = id
-        Store.currentPeer = id
-    }
-
-    /** 有设备主动向本机"打招呼"（扫码连接成功）时发出其 id */
+    /** 有设备主动向本机"打招呼"（对方扫了本机二维码）时发出其 id */
     val hellos = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    /** 从系统分享菜单收到、等待选择设备的内容 */
+    val pendingShare = MutableStateFlow<Share?>(null)
 
     @Volatile var port = 0
     @Volatile var discovery: Discovery? = null
+    @Volatile var openPeer: String? = null      // 当前正在查看的聊天对象
+    @Volatile var helloCount = 0
+    @Volatile var lastActivity = 0L
 
     private var saveJob: Job? = null
+    private var sweepJob: Job? = null
 
     fun init(c: Context) {
         app = c.applicationContext
         Store.init(app)
         _msgs.value = Store.loadMsgs()
         _peers.value = Store.loadPeers()
-        val saved = Store.currentPeer
-        _current.value = if (saved != null && _peers.value.containsKey(saved)) saved
-        else _msgs.value.lastOrNull { _peers.value.containsKey(it.peerId) }?.peerId
-            ?: _peers.value.values.maxByOrNull { it.lastSeen }?.id
     }
 
     fun toast(s: String) {
         Handler(Looper.getMainLooper()).post { Toast.makeText(app, s, Toast.LENGTH_SHORT).show() }
     }
+
+    fun touch() { lastActivity = now() }
 
     private fun persistSoon() {
         saveJob?.cancel()
@@ -64,29 +60,91 @@ object Hub {
     // ---------- 设备 ----------
     fun upsertPeer(id: String, name: String, host: String, port: Int) {
         if (id == Store.deviceId) return
+        var changed = false
         _peers.update { map ->
             val old = map[id]
             val n = name.ifEmpty { old?.name ?: "未知设备" }
+            changed = old == null || old.host != host || old.port != port || old.name != n
             map + (id to Peer(id, n, host, port, true, now()))
         }
-        if (_current.value == null) setCurrent(id)
-        persistSoon()
+        if (changed) persistSoon()
+    }
+
+    fun markOnline(id: String) {
+        _peers.update { map ->
+            val p = map[id] ?: return@update map
+            map + (id to p.copy(online = true, lastSeen = now()))
+        }
     }
 
     fun setOffline(id: String) {
         _peers.update { map ->
             val p = map[id] ?: return@update map
-            map + (id to p.copy(online = false))
+            if (!p.online) map else map + (id to p.copy(online = false))
+        }
+    }
+
+    fun forgetPeer(id: String) {
+        _msgs.update { l -> l.filter { it.peerId != id } }
+        _peers.update { it - id }
+        persistSoon()
+    }
+
+    /** 逐个探测已记住但显示离线的设备：能连上就立刻标为在线 */
+    fun probeKnown() {
+        scope.launch {
+            _peers.value.values.filter { !it.online && it.host.isNotEmpty() }.forEach { p ->
+                launch { if (Net.ping(p)) markOnline(p.id) }
+            }
+        }
+    }
+
+    fun rescan() {
+        discovery?.restart()
+        probeKnown()
+    }
+
+    fun onNetworkChanged() {
+        discovery?.restart()
+        probeKnown()
+    }
+
+    /** 后台巡检：在线设备久未见到就探测一次；定期重试离线设备；热点空闲自动断开 */
+    fun startSweeper() {
+        if (sweepJob?.isActive == true) return
+        sweepJob = scope.launch {
+            var tick = 0
+            while (isActive) {
+                delay(5000)
+                tick++
+                val t = now()
+                _peers.value.values.filter { it.online && t - it.lastSeen > 12000 }.forEach { p ->
+                    launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
+                }
+                if (tick % 3 == 0) probeKnown()
+
+                val hotspotOn = HotspotHost.payload.value != null
+                if ((hotspotOn || HotspotJoin.active.value) && t - lastActivity > 180_000 &&
+                    _msgs.value.none { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }
+                ) {
+                    HotspotJoin.leave()
+                    HotspotHost.stop()
+                    if (hotspotOn) HotspotHost.error.value = "热点已因空闲自动关闭，请重新打开"
+                    toast("空闲已自动断开热点连接")
+                }
+            }
         }
     }
 
     // ---------- 消息 ----------
     fun addMsg(m: Msg) {
+        touch()
         _msgs.update { it + m }
         persistSoon()
     }
 
     fun patch(id: String, f: (Msg) -> Msg) {
+        touch()
         var terminal = false
         _msgs.update { list ->
             list.map {
@@ -98,6 +156,17 @@ object Hub {
             }
         }
         if (terminal) persistSoon()
+    }
+
+    fun markRead(peerId: String) {
+        if (_msgs.value.none { it.peerId == peerId && !it.outgoing && !it.read }) return
+        _msgs.update { l -> l.map { if (it.peerId == peerId && !it.outgoing && !it.read) it.copy(read = true) else it } }
+        persistSoon()
+    }
+
+    fun clearHistory(peerId: String) {
+        _msgs.update { l -> l.filter { it.peerId != peerId } }
+        persistSoon()
     }
 
     // ---------- 发送 ----------
