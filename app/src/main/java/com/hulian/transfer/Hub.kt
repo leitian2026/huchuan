@@ -21,6 +21,14 @@ object Hub {
     private val _peers = MutableStateFlow<Map<String, Peer>>(emptyMap())
     val peers = _peers.asStateFlow()
 
+    private val _current = MutableStateFlow<String?>(null)
+    val current = _current.asStateFlow()
+
+    fun setCurrent(id: String?) {
+        _current.value = id
+        Store.currentPeer = id
+    }
+
     /** 有设备主动向本机"打招呼"（扫码连接成功）时发出其 id */
     val hellos = MutableSharedFlow<String>(extraBufferCapacity = 8)
 
@@ -34,6 +42,10 @@ object Hub {
         Store.init(app)
         _msgs.value = Store.loadMsgs()
         _peers.value = Store.loadPeers()
+        val saved = Store.currentPeer
+        _current.value = if (saved != null && _peers.value.containsKey(saved)) saved
+        else _msgs.value.lastOrNull { _peers.value.containsKey(it.peerId) }?.peerId
+            ?: _peers.value.values.maxByOrNull { it.lastSeen }?.id
     }
 
     fun toast(s: String) {
@@ -57,6 +69,7 @@ object Hub {
             val n = name.ifEmpty { old?.name ?: "未知设备" }
             map + (id to Peer(id, n, host, port, true, now()))
         }
+        if (_current.value == null) setCurrent(id)
         persistSoon()
     }
 
