@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,7 +74,7 @@ fun HulianTheme(content: @Composable () -> Unit) {
 
 sealed interface Screen {
     data object Home : Screen
-    data class Chat(val peerId: String) : Screen
+    data object Devices : Screen
     data class Picker(val peerId: String) : Screen
     data object Connect : Screen
     data object Settings : Screen
@@ -84,16 +86,19 @@ fun AppRoot() {
     fun push(s: Screen) { stack = stack + s }
     fun pop() { if (stack.size > 1) stack = stack.dropLast(1) }
     BackHandler(stack.size > 1) { pop() }
-    Box(Modifier.fillMaxSize().background(ChatBg)) {
+    val cur by Hub.current.collectAsState()
+    Box(Modifier.fillMaxSize().background(ChatBg).navigationBarsPadding()) {
         when (val s = stack.last()) {
-            Screen.Home -> HomeScreen(
-                onChat = { push(Screen.Chat(it)) },
-                onConnect = { push(Screen.Connect) },
-                onSettings = { push(Screen.Settings) }
-            )
-            is Screen.Chat -> ChatScreen(s.peerId, onBack = { pop() }, onPickApps = { push(Screen.Picker(s.peerId)) })
+            Screen.Home -> ChatScreen(cur, null, onPickApps = { push(Screen.Picker(it)) }) {
+                HomeMenu(
+                    onDevices = { push(Screen.Devices) },
+                    onConnect = { push(Screen.Connect) },
+                    onSettings = { push(Screen.Settings) }
+                )
+            }
+            Screen.Devices -> DevicesScreen(onBack = { pop() }, onConnect = { push(Screen.Connect) })
             is Screen.Picker -> PickerScreen(s.peerId, onBack = { pop() })
-            Screen.Connect -> ConnectScreen(onBack = { pop() }, onChat = { id -> stack = stack.dropLast(1) + Screen.Chat(id) })
+            Screen.Connect -> ConnectScreen(onBack = { pop() }, onChat = { id -> Hub.setCurrent(id); stack = listOf(Screen.Home) })
             Screen.Settings -> SettingsScreen(onBack = { pop() })
         }
     }
@@ -103,20 +108,26 @@ fun AppRoot() {
 
 @Composable
 fun TopBar(title: String, onBack: (() -> Unit)?, actions: @Composable RowScope.() -> Unit = {}) {
-    Row(
-        Modifier.fillMaxWidth().height(56.dp)
-            .background(Brush.horizontalGradient(listOf(Blue1, Blue2))).padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+    // 渐变背景先画，再加状态栏内边距：渐变会一直铺到屏幕最顶端，和状态栏融为一体
+    Box(
+        Modifier.fillMaxWidth()
+            .background(Brush.horizontalGradient(listOf(Blue1, Blue2)))
+            .statusBarsPadding()
     ) {
-        if (onBack != null) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
+        Row(
+            Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
+                }
+            } else {
+                Spacer(Modifier.width(12.dp))
             }
-        } else {
-            Spacer(Modifier.width(12.dp))
+            Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            actions()
         }
-        Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        actions()
     }
 }
 
@@ -148,28 +159,41 @@ fun qrBitmap(text: String, size: Int = 640): ImageBitmap {
     return bmp.asImageBitmap()
 }
 
-// ---------------- 首页：设备列表 ----------------
+// ---------------- 设备列表（切换聊天对象） ----------------
 
 @Composable
-fun HomeScreen(onChat: (String) -> Unit, onConnect: () -> Unit, onSettings: () -> Unit) {
+fun HomeMenu(onDevices: () -> Unit, onConnect: () -> Unit, onSettings: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("切换设备") }, onClick = { open = false; onDevices() })
+            DropdownMenuItem(text = { Text("连接设备（扫码 / 热点）") }, onClick = { open = false; onConnect() })
+            DropdownMenuItem(text = { Text("重新搜索设备") }, onClick = { open = false; Hub.discovery?.restart() })
+            DropdownMenuItem(text = { Text("设置") }, onClick = { open = false; onSettings() })
+        }
+    }
+}
+
+@Composable
+fun DevicesScreen(onBack: () -> Unit, onConnect: () -> Unit) {
     val peers by Hub.peers.collectAsState()
     val msgs by Hub.msgs.collectAsState()
+    val cur by Hub.current.collectAsState()
     val list = remember(peers) {
         peers.values.sortedWith(compareByDescending<Peer> { it.online }.thenByDescending { it.lastSeen })
     }
     Column(Modifier.fillMaxSize()) {
-        TopBar("互传", null) {
+        TopBar("选择设备", onBack) {
             IconButton(onClick = { Hub.discovery?.restart() }) { Icon(Icons.Default.Refresh, "刷新", tint = Color.White) }
-            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "设置", tint = Color.White) }
         }
         Text(
-            "本机：${Store.deviceName}　${if (list.any { it.online }) "" else "（连同一 Wi-Fi 后自动出现设备）"}",
-            color = Gray, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            "本机：${Store.deviceName}", color = Gray, fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
         )
-        Button(
-            onClick = onConnect,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-        ) { Text("连接设备（扫码 / 热点）") }
+        Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Text("连接设备（扫码 / 热点）")
+        }
         Spacer(Modifier.height(8.dp))
         if (list.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -185,7 +209,9 @@ fun HomeScreen(onChat: (String) -> Unit, onConnect: () -> Unit, onSettings: () -
                         Kind.APP -> "[应用] ${last.name}"
                     }
                     Row(
-                        Modifier.fillMaxWidth().background(Color.White).clickable { onChat(p.id) }.padding(14.dp),
+                        Modifier.fillMaxWidth()
+                            .background(if (p.id == cur) Color(0xFFE3F3FE) else Color.White)
+                            .clickable { Hub.setCurrent(p.id); onBack() }.padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Avatar(p.name, p.online)
@@ -206,20 +232,32 @@ fun HomeScreen(onChat: (String) -> Unit, onConnect: () -> Unit, onSettings: () -
 // ---------------- 聊天 ----------------
 
 @Composable
-fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
+fun ChatScreen(
+    peerId: String?,
+    onBack: (() -> Unit)?,
+    onPickApps: (String) -> Unit,
+    menu: @Composable RowScope.() -> Unit = {}
+) {
     val ctx = LocalContext.current
     val peers by Hub.peers.collectAsState()
     val all by Hub.msgs.collectAsState()
-    val peer = peers[peerId]
-    val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
+    val peer = if (peerId == null) null else peers[peerId]
+    val list = remember(all, peerId) {
+        if (peerId == null) emptyList() else all.filter { it.peerId == peerId }.sortedBy { it.time }
+    }
     val ls = rememberLazyListState()
     LaunchedEffect(list.size) { if (list.isNotEmpty()) ls.scrollToItem(list.size - 1) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uris.forEach {
+        if (peerId != null) uris.forEach {
             try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
             Hub.sendFile(peerId, it)
         }
+    }
+
+    fun needPeer(): Boolean {
+        if (peerId == null) { Hub.toast("请先连接设备（右上角菜单 → 连接设备）"); return false }
+        return true
     }
 
     fun onMsgClick(m: Msg) {
@@ -232,31 +270,46 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         }
     }
 
+    val title = when {
+        peer == null -> "互传"
+        peer.online -> peer.name
+        else -> peer.name + "（离线）"
+    }
+
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopBar((peer?.name ?: "聊天") + if (peer?.online == true) "" else "（离线）", onBack)
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = ls, contentPadding = PaddingValues(vertical = 8.dp)) {
-            itemsIndexed(list, key = { _, m -> m.id }) { i, m ->
-                Column {
-                    if (i == 0 || m.time - list[i - 1].time > 300_000) {
-                        Text(
-                            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(m.time)),
-                            color = Gray, fontSize = 12.sp,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
+        TopBar(title, onBack, menu)
+        if (list.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (peerId == null) "还没有连接设备\n点右上角菜单 → 连接设备" else "还没有传输记录",
+                    color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = ls, contentPadding = PaddingValues(vertical = 8.dp)) {
+                itemsIndexed(list, key = { _, m -> m.id }) { i, m ->
+                    Column {
+                        if (i == 0 || m.time - list[i - 1].time > 300_000) {
+                            Text(
+                                SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(m.time)),
+                                color = Gray, fontSize = 12.sp,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        MsgRow(m, peer?.name ?: "?") { onMsgClick(m) }
                     }
-                    MsgRow(m, peer?.name ?: "?") { onMsgClick(m) }
                 }
             }
         }
         var text by remember { mutableStateOf("") }
-        var menu by remember { mutableStateOf(false) }
+        var menuOpen by remember { mutableStateOf(false) }
         Row(Modifier.fillMaxWidth().background(Color(0xFFF7F8FA)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menu = false; picker.launch(arrayOf("*/*")) })
-                    DropdownMenuItem(text = { Text("发送应用") }, onClick = { menu = false; onPickApps() })
+                IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; if (needPeer()) picker.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("发送应用") }, onClick = { menuOpen = false; if (needPeer()) peerId?.let(onPickApps) })
                 }
             }
             TextField(
@@ -269,7 +322,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 )
             )
             IconButton(onClick = {
-                if (text.isNotBlank()) { Hub.sendText(peerId, text.trim()); text = "" }
+                if (text.isNotBlank() && needPeer()) { peerId?.let { Hub.sendText(it, text.trim()) }; text = "" }
             }) { Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Blue2) }
         }
     }
@@ -522,10 +575,17 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
     }
     DisposableEffect(Unit) { onDispose { Hub.discovery?.restart() } }
+    val ver = remember {
+        try {
+            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            "${pi.versionName}（${pi.longVersionCode}）"
+        } catch (e: Exception) { "" }
+    }
 
     Column(Modifier.fillMaxSize()) {
         TopBar("设置", onBack)
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("当前版本：$ver", fontSize = 13.sp, color = Gray)
             OutlinedTextField(
                 value = name, onValueChange = { name = it; if (it.isNotBlank()) Store.deviceName = it.trim() },
                 label = { Text("本机名称（对方看到的名字）") }, singleLine = true, modifier = Modifier.fillMaxWidth()
