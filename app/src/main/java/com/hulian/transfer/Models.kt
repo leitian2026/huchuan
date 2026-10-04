@@ -1,5 +1,6 @@
 package com.hulian.transfer
 
+import android.net.Uri
 import java.util.UUID
 
 enum class Kind { TEXT, FILE, APP }
@@ -29,8 +30,12 @@ data class Msg(
     val uri: String = "",       // 收到的文件位置 / 待发送文件来源
     val pkg: String = "",
     val ver: String = "",
-    val error: String = ""
+    val error: String = "",
+    val read: Boolean = true    // 收到的消息是否已读（用于未读数）
 )
+
+/** 从系统“分享”菜单收到的待发送内容 */
+data class Share(val uris: List<Uri>, val text: String?)
 
 fun now() = System.currentTimeMillis()
 fun newId() = UUID.randomUUID().toString()
