@@ -16,7 +16,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 1000 + buildNo
-        versionName = "0.2.$buildNo"
+        versionName = "0.3.$buildNo"
     }
 
     // 固定的调试签名：每次 CI 构建签名一致，才能直接覆盖安装升级
