@@ -14,8 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -24,11 +24,14 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -42,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -51,16 +55,17 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 val Blue1 = Color(0xFF5FD3FA)
 val Blue2 = Color(0xFF4BA6F5)
 val ChatBg = Color(0xFFEBEEF5)
+val ListBg = Color(0xFFF5F6FA)
 val OutBubble = Color(0xFF4FB5F5)
 val Gray = Color(0xFF8A8F99)
 
@@ -74,32 +79,94 @@ fun HulianTheme(content: @Composable () -> Unit) {
 
 sealed interface Screen {
     data object Home : Screen
-    data object Devices : Screen
+    data class Chat(val peerId: String) : Screen
     data class Picker(val peerId: String) : Screen
     data object Connect : Screen
-    data object Settings : Screen
+    data object MyQr : Screen
 }
 
 @Composable
 fun AppRoot() {
+    val ctx = LocalContext.current
     var stack by remember { mutableStateOf<List<Screen>>(listOf(Screen.Home)) }
+    var tab by remember { mutableStateOf(0) }
     fun push(s: Screen) { stack = stack + s }
     fun pop() { if (stack.size > 1) stack = stack.dropLast(1) }
+    fun openChat(id: String) { stack = listOf(Screen.Home, Screen.Chat(id)) }
     BackHandler(stack.size > 1) { pop() }
-    val cur by Hub.current.collectAsState()
-    Box(Modifier.fillMaxSize().background(ChatBg).navigationBarsPadding()) {
-        when (val s = stack.last()) {
-            Screen.Home -> ChatScreen(cur, null, onPickApps = { push(Screen.Picker(it)) }) {
-                HomeMenu(
-                    onDevices = { push(Screen.Devices) },
-                    onConnect = { push(Screen.Connect) },
-                    onSettings = { push(Screen.Settings) }
-                )
+
+    val share by Hub.pendingShare.collectAsState()
+    val joinStatus by HotspotJoin.status.collectAsState()
+    BackHandler(share != null) { Hub.pendingShare.value = null }
+
+    // 首次使用：一次性说明并申请权限，之后不再逐项打断
+    var showIntro by remember { mutableStateOf(!Store.permsAsked) }
+    val permsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        Store.permsAsked = true
+        showIntro = false
+    }
+    if (showIntro) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("首次使用需要几项授权") },
+            text = { Text("• 通知：让互传在后台保持接收\n• 附近设备 / 定位：发现设备、创建热点\n• 相机：扫描二维码\n\n授权一次，之后不会再逐项弹窗打断你。") },
+            confirmButton = { TextButton(onClick = { permsLauncher.launch(requiredPerms()) }) { Text("继续") } }
+        )
+    }
+
+    // 对方扫了本机二维码 / 本机扫码连上热点后，自动进入对应聊天
+    LaunchedEffect(Unit) {
+        Hub.hellos.collect { id ->
+            val top = stack.last()
+            if (top is Screen.MyQr || top is Screen.Connect) openChat(id)
+        }
+    }
+    LaunchedEffect(Unit) {
+        HotspotJoin.connected.collect { id ->
+            if (id != null) {
+                HotspotJoin.connected.value = null
+                openChat(id)
             }
-            Screen.Devices -> DevicesScreen(onBack = { pop() }, onConnect = { push(Screen.Connect) })
-            is Screen.Picker -> PickerScreen(s.peerId, onBack = { pop() })
-            Screen.Connect -> ConnectScreen(onBack = { pop() }, onChat = { id -> Hub.setCurrent(id); stack = listOf(Screen.Home) })
-            Screen.Settings -> SettingsScreen(onBack = { pop() })
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(ChatBg)) {
+        val sh = share
+        if (sh != null) {
+            Box(Modifier.fillMaxSize().navigationBarsPadding()) {
+                ShareScreen(sh) { id ->
+                    Hub.pendingShare.value = null
+                    if (id != null) openChat(id)
+                }
+            }
+        } else {
+            when (val cur = stack.last()) {
+                Screen.Home -> HomeTabs(
+                    tab = tab, onTab = { tab = it },
+                    onChat = { push(Screen.Chat(it)) },
+                    onOpenChat = { openChat(it) },
+                    onConnect = { push(Screen.Connect) },
+                    onMyQr = { push(Screen.MyQr) }
+                )
+                else -> Box(Modifier.fillMaxSize().navigationBarsPadding()) {
+                    when (cur) {
+                        is Screen.Chat -> ChatScreen(cur.peerId, onBack = { pop() }, onPickApps = { push(Screen.Picker(cur.peerId)) })
+                        is Screen.Picker -> PickerScreen(cur.peerId) { pop() }
+                        Screen.Connect -> ConnectScreen(onBack = { pop() }, onMyQr = { push(Screen.MyQr) }, onOpenChat = { openChat(it) })
+                        Screen.MyQr -> MyQrScreen(onBack = { pop() })
+                        Screen.Home -> {}
+                    }
+                }
+            }
+        }
+        if (joinStatus.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp), color = Color(0xE6333333),
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 96.dp)
+            ) {
+                Text(joinStatus, color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+            }
         }
     }
 }
@@ -132,12 +199,12 @@ fun TopBar(title: String, onBack: (() -> Unit)?, actions: @Composable RowScope.(
 }
 
 @Composable
-fun Avatar(name: String, online: Boolean = true) {
+fun Avatar(name: String, online: Boolean = true, size: Dp = 42.dp) {
     Box(
-        Modifier.size(42.dp).clip(CircleShape).background(if (online) Blue2 else Color(0xFFB8BEC8)),
+        Modifier.size(size).clip(CircleShape).background(if (online) Blue2 else Color(0xFFB8BEC8)),
         contentAlignment = Alignment.Center
     ) {
-        Text(name.take(1).uppercase(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(name.take(1).uppercase(), color = Color.White, fontSize = (size.value * 0.43f).sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -146,6 +213,30 @@ fun fmtSize(b: Long): String = when {
     b < 1024 * 1024 -> String.format(Locale.US, "%.1f KB", b / 1024.0)
     b < 1024L * 1024 * 1024 -> String.format(Locale.US, "%.2f MB", b / 1048576.0)
     else -> String.format(Locale.US, "%.2f GB", b / 1073741824.0)
+}
+
+/** 消息列表右侧的时间：今天 时:分 / 昨天 / 月-日 / 年-月-日 */
+fun fmtListTime(t: Long): String {
+    if (t <= 0) return ""
+    val nowC = Calendar.getInstance()
+    val c = Calendar.getInstance().apply { timeInMillis = t }
+    val sameYear = nowC.get(Calendar.YEAR) == c.get(Calendar.YEAR)
+    val dayDiff = nowC.get(Calendar.DAY_OF_YEAR) - c.get(Calendar.DAY_OF_YEAR)
+    return when {
+        sameYear && dayDiff == 0 -> SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(t))
+        sameYear && dayDiff == 1 -> "昨天"
+        sameYear -> SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(t))
+        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(t))
+    }
+}
+
+fun previewOf(m: Msg): String {
+    val body = when (m.kind) {
+        Kind.TEXT -> m.text
+        Kind.FILE -> "[文件]${m.name}"
+        Kind.APP -> "[应用]${m.name}"
+    }
+    return if (m.outgoing && m.state == MsgState.FAILED) "[发送失败] $body" else body
 }
 
 fun qrBitmap(text: String, size: Int = 640): ImageBitmap {
@@ -159,105 +250,33 @@ fun qrBitmap(text: String, size: Int = 640): ImageBitmap {
     return bmp.asImageBitmap()
 }
 
-// ---------------- 设备列表（切换聊天对象） ----------------
-
-@Composable
-fun HomeMenu(onDevices: () -> Unit, onConnect: () -> Unit, onSettings: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        IconButton(onClick = { open = true }) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(text = { Text("切换设备") }, onClick = { open = false; onDevices() })
-            DropdownMenuItem(text = { Text("连接设备（扫码 / 热点）") }, onClick = { open = false; onConnect() })
-            DropdownMenuItem(text = { Text("重新搜索设备") }, onClick = { open = false; Hub.discovery?.restart() })
-            DropdownMenuItem(text = { Text("设置") }, onClick = { open = false; onSettings() })
-        }
-    }
-}
-
-@Composable
-fun DevicesScreen(onBack: () -> Unit, onConnect: () -> Unit) {
-    val peers by Hub.peers.collectAsState()
-    val msgs by Hub.msgs.collectAsState()
-    val cur by Hub.current.collectAsState()
-    val list = remember(peers) {
-        peers.values.sortedWith(compareByDescending<Peer> { it.online }.thenByDescending { it.lastSeen })
-    }
-    Column(Modifier.fillMaxSize()) {
-        TopBar("选择设备", onBack) {
-            IconButton(onClick = { Hub.discovery?.restart() }) { Icon(Icons.Default.Refresh, "刷新", tint = Color.White) }
-        }
-        Text(
-            "本机：${Store.deviceName}", color = Gray, fontSize = 13.sp,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-        )
-        Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            Text("连接设备（扫码 / 热点）")
-        }
-        Spacer(Modifier.height(8.dp))
-        if (list.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("还没有设备\n两台手机连同一个 Wi-Fi 并打开本应用即可", color = Gray, fontSize = 15.sp)
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(list, key = { it.id }) { p ->
-                    val last = msgs.lastOrNull { it.peerId == p.id }
-                    val preview = if (last == null) p.host else when (last.kind) {
-                        Kind.TEXT -> last.text
-                        Kind.FILE -> "[文件] ${last.name}"
-                        Kind.APP -> "[应用] ${last.name}"
-                    }
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .background(if (p.id == cur) Color(0xFFE3F3FE) else Color.White)
-                            .clickable { Hub.setCurrent(p.id); onBack() }.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Avatar(p.name, p.online)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(p.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(preview, fontSize = 13.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        Text(if (p.online) "在线" else "离线", fontSize = 12.sp, color = if (p.online) Color(0xFF2EB872) else Gray)
-                    }
-                    HorizontalDivider(color = ChatBg)
-                }
-            }
-        }
-    }
-}
-
 // ---------------- 聊天 ----------------
 
 @Composable
-fun ChatScreen(
-    peerId: String?,
-    onBack: (() -> Unit)?,
-    onPickApps: (String) -> Unit,
-    menu: @Composable RowScope.() -> Unit = {}
-) {
+fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     val ctx = LocalContext.current
     val peers by Hub.peers.collectAsState()
     val all by Hub.msgs.collectAsState()
-    val peer = if (peerId == null) null else peers[peerId]
-    val list = remember(all, peerId) {
-        if (peerId == null) emptyList() else all.filter { it.peerId == peerId }.sortedBy { it.time }
-    }
+    val joinActive by HotspotJoin.active.collectAsState()
+    val hsPayload by HotspotHost.payload.collectAsState()
+    val peer = peers[peerId]
+    val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
     val ls = rememberLazyListState()
     LaunchedEffect(list.size) { if (list.isNotEmpty()) ls.scrollToItem(list.size - 1) }
 
+    // 打开聊天即视为已读；聊天开着时收到的新消息也直接算已读
+    DisposableEffect(peerId) {
+        Hub.openPeer = peerId
+        Hub.markRead(peerId)
+        onDispose { if (Hub.openPeer == peerId) Hub.openPeer = null }
+    }
+    LaunchedEffect(all.size) { Hub.markRead(peerId) }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (peerId != null) uris.forEach {
+        uris.forEach {
             try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
             Hub.sendFile(peerId, it)
         }
-    }
-
-    fun needPeer(): Boolean {
-        if (peerId == null) { Hub.toast("请先连接设备（右上角菜单 → 连接设备）"); return false }
-        return true
     }
 
     fun onMsgClick(m: Msg) {
@@ -271,19 +290,33 @@ fun ChatScreen(
     }
 
     val title = when {
-        peer == null -> "互传"
+        peer == null -> "聊天"
         peer.online -> peer.name
         else -> peer.name + "（离线）"
     }
+    val linkActive = joinActive || hsPayload != null
+    var more by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopBar(title, onBack, menu)
+        TopBar(title, onBack) {
+            Box {
+                IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
+                DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                    if (linkActive) {
+                        DropdownMenuItem(text = { Text("断开热点连接") }, onClick = {
+                            more = false
+                            HotspotJoin.leave()
+                            HotspotHost.stop()
+                        })
+                    }
+                    DropdownMenuItem(text = { Text("清空聊天记录") }, onClick = { more = false; Hub.clearHistory(peerId) })
+                    DropdownMenuItem(text = { Text("删除此设备") }, onClick = { more = false; Hub.forgetPeer(peerId); onBack() })
+                }
+            }
+        }
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(
-                    if (peerId == null) "还没有连接设备\n点右上角菜单 → 连接设备" else "还没有传输记录",
-                    color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
-                )
+                Text("还没有传输记录", color = Gray, fontSize = 14.sp)
             }
         } else {
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = ls, contentPadding = PaddingValues(vertical = 8.dp)) {
@@ -308,8 +341,8 @@ fun ChatScreen(
             Box {
                 IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; if (needPeer()) picker.launch(arrayOf("*/*")) })
-                    DropdownMenuItem(text = { Text("发送应用") }, onClick = { menuOpen = false; if (needPeer()) peerId?.let(onPickApps) })
+                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; picker.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("发送应用") }, onClick = { menuOpen = false; onPickApps() })
                 }
             }
             TextField(
@@ -322,7 +355,7 @@ fun ChatScreen(
                 )
             )
             IconButton(onClick = {
-                if (text.isNotBlank() && needPeer()) { peerId?.let { Hub.sendText(it, text.trim()) }; text = "" }
+                if (text.isNotBlank()) { Hub.sendText(peerId, text.trim()); text = "" }
             }) { Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Blue2) }
         }
     }
@@ -465,142 +498,5 @@ fun PickerScreen(peerId: String, onBack: () -> Unit) {
             enabled = sel.isNotEmpty(),
             modifier = Modifier.fillMaxWidth().padding(12.dp)
         ) { Text("发送（${sel.size}）") }
-    }
-}
-
-// ---------------- 连接：二维码 / 热点 / 扫码 ----------------
-
-@Composable
-fun ConnectScreen(onBack: () -> Unit, onChat: (String) -> Unit) {
-    val ctx = LocalContext.current
-    val hsPayload by HotspotHost.payload.collectAsState()
-    val hsErr by HotspotHost.error.collectAsState()
-    val joinStatus by HotspotJoin.status.collectAsState()
-    val joined by HotspotJoin.connected.collectAsState()
-    var lanQr by remember { mutableStateOf<ImageBitmap?>(null) }
-
-    LaunchedEffect(Unit) { Hub.hellos.collect { onChat(it) } }
-    LaunchedEffect(joined) { joined?.let { HotspotJoin.connected.value = null; onChat(it) } }
-
-    val wifiPerm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.NEARBY_WIFI_DEVICES else Manifest.permission.ACCESS_FINE_LOCATION
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) HotspotHost.start(ctx) else HotspotHost.error.value = "需要授予\u201c附近设备/定位\u201d权限才能创建热点"
-    }
-
-    fun handleQr(text: String) {
-        val j = try { JSONObject(text) } catch (e: Exception) { null }
-        if (j == null || j.optString("t") != "hl") { Hub.toast("这不是互传的二维码"); return }
-        try {
-            if (j.has("ssid")) {
-                HotspotJoin.join(ctx, j.getString("ssid"), j.getString("pwd"), j.getString("id"), j.optString("name"), j.getInt("port"))
-            } else {
-                val id = j.getString("id")
-                Hub.upsertPeer(id, j.optString("name"), j.getString("ip"), j.getInt("port"))
-                Hub.scope.launch { Hub.hello(id) }
-                onChat(id)
-            }
-        } catch (e: Exception) {
-            Hub.toast("二维码内容无效")
-        }
-    }
-
-    val scan = rememberLauncherForActivityResult(ScanContract()) { r -> r.contents?.let { handleQr(it) } }
-
-    Column(Modifier.fillMaxSize()) {
-        TopBar("连接设备", onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("同一个 Wi-Fi", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("两台手机连同一个 Wi-Fi 并打开本应用，会自动出现在首页，不用扫码。如果一直找不到（路由器开了设备隔离），可以让对方扫你的二维码。", fontSize = 13.sp, color = Gray)
-                    OutlinedButton(onClick = {
-                        val ip = Net.localIps().firstOrNull()
-                        if (ip == null) Hub.toast("没有找到本机局域网地址，请先连接 Wi-Fi")
-                        else lanQr = qrBitmap(JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-                            .put("name", Store.deviceName).put("port", Hub.port).toString())
-                    }) { Text("显示我的二维码") }
-                    lanQr?.let { Image(it, null, Modifier.size(220.dp).align(Alignment.CenterHorizontally)) }
-                }
-            }
-            Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("没有 Wi-Fi", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("一方创建仅用于互传的热点并显示二维码，另一方扫码连接（不消耗流量，对方会暂时断开原来的 Wi-Fi）。", fontSize = 13.sp, color = Gray)
-                    if (hsPayload == null) {
-                        OutlinedButton(onClick = {
-                            if (ContextCompat.checkSelfPermission(ctx, wifiPerm) == PackageManager.PERMISSION_GRANTED) HotspotHost.start(ctx)
-                            else permLauncher.launch(wifiPerm)
-                        }) { Text("创建热点并显示二维码") }
-                    } else {
-                        val img = remember(hsPayload) { qrBitmap(hsPayload!!) }
-                        Image(img, null, Modifier.size(220.dp).align(Alignment.CenterHorizontally))
-                        OutlinedButton(onClick = { HotspotHost.stop() }) { Text("停止热点") }
-                    }
-                    hsErr?.let { Text(it, color = Color(0xFFE5484D), fontSize = 12.sp) }
-                }
-            }
-            Button(
-                onClick = { scan.launch(ScanOptions().setPrompt("扫描对方的互传二维码").setBeepEnabled(false).setOrientationLocked(false)) },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("扫一扫") }
-            if (joinStatus.isNotEmpty()) Text(joinStatus, fontSize = 13.sp, color = Gray)
-        }
-    }
-}
-
-// ---------------- 设置 ----------------
-
-@Composable
-fun SettingsScreen(onBack: () -> Unit) {
-    val ctx = LocalContext.current
-    var name by remember { mutableStateOf(Store.deviceName) }
-    var dir by remember { mutableStateOf(Store.saveDir) }
-    val dirLabel = remember(dir) {
-        dir?.let {
-            val d = DocumentFile.fromTreeUri(ctx, Uri.parse(it))
-            if (d != null && d.canWrite()) d.name ?: "已选择" else "（所选文件夹不可用，请重新选择）"
-        } ?: "默认：下载/互传"
-    }
-    val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            try {
-                ctx.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-                Store.saveDir = uri.toString()
-                dir = uri.toString()
-            } catch (e: Exception) {
-                Hub.toast("无法获得该文件夹的写入权限，请换一个（可新建子文件夹）")
-            }
-        }
-    }
-    DisposableEffect(Unit) { onDispose { Hub.discovery?.restart() } }
-    val ver = remember {
-        try {
-            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-            "${pi.versionName}（${pi.longVersionCode}）"
-        } catch (e: Exception) { "" }
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        TopBar("设置", onBack)
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("当前版本：$ver", fontSize = 13.sp, color = Gray)
-            OutlinedTextField(
-                value = name, onValueChange = { name = it; if (it.isNotBlank()) Store.deviceName = it.trim() },
-                label = { Text("本机名称（对方看到的名字）") }, singleLine = true, modifier = Modifier.fillMaxWidth()
-            )
-            Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("接收文件保存位置", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text(dirLabel, fontSize = 14.sp)
-                    Text("选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。", fontSize = 12.sp, color = Gray)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { treePicker.launch(null) }) { Text("选择文件夹") }
-                        if (dir != null) OutlinedButton(onClick = { Store.saveDir = null; dir = null }) { Text("恢复默认") }
-                    }
-                }
-            }
-        }
     }
 }
