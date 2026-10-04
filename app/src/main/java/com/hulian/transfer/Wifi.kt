@@ -12,12 +12,13 @@ import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.net.Inet4Address
 
-/** 模式二（本机当"主机"）：开一个仅用于互传的本地热点，二维码里放热点账号密码 */
+/** 没有 Wi-Fi 时（本机当"主机"）：开一个仅用于互传的本地热点，二维码里放热点账号密码 */
 object HotspotHost {
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
     val payload = MutableStateFlow<String?>(null)
@@ -28,6 +29,7 @@ object HotspotHost {
     fun start(ctx: Context) {
         stop()
         error.value = null
+        Hub.touch()
         val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         try {
             wm.startLocalOnlyHotspot(object : WifiManager.LocalOnlyHotspotCallback() {
@@ -44,6 +46,7 @@ object HotspotHost {
                         ssid = (c?.SSID ?: "").removeSurrounding("\"")
                         pwd = (c?.preSharedKey ?: "").removeSurrounding("\"")
                     }
+                    Hub.touch()
                     payload.value = JSONObject().put("t", "hl").put("ssid", ssid).put("pwd", pwd)
                         .put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
                         .toString()
@@ -70,15 +73,25 @@ object HotspotHost {
     }
 }
 
-/** 模式二（本机当"客人"）：扫码后用 WifiNetworkSpecifier 连到对方热点，再向网关发消息 */
+/** 没有 Wi-Fi 时（本机当"客人"）：扫码后连到对方热点，再向网关发消息 */
 object HotspotJoin {
     val status = MutableStateFlow("")
     val connected = MutableStateFlow<String?>(null)
+    /** 本机当前是否连着（或正在连）对方热点 */
+    val active = MutableStateFlow(false)
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var cm: ConnectivityManager? = null
 
+    private fun clearStatusLater() {
+        Hub.scope.launch {
+            delay(3000)
+            if (!active.value) status.value = ""
+        }
+    }
+
     fun join(ctx: Context, ssid: String, pwd: String, peerId: String, peerName: String, port: Int) {
         leave()
+        Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
         cm = m
         val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pwd).build()
@@ -87,7 +100,8 @@ object HotspotJoin {
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .setNetworkSpecifier(spec)
             .build()
-        status.value = "正在连接 $ssid …（请在系统弹窗中点\u201c连接\u201d）"
+        active.value = true
+        status.value = "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
         var finished = false
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -102,7 +116,9 @@ object HotspotJoin {
                 }
                 if (gw == null) return
                 finished = true
-                status.value = "已连接到对方热点"
+                Hub.touch()
+                status.value = ""
+                Hub.toast("已连接到对方热点")
                 Hub.upsertPeer(peerId, peerName, gw, port)
                 Hub.scope.launch {
                     Hub.hello(peerId)
@@ -111,22 +127,28 @@ object HotspotJoin {
             }
 
             override fun onUnavailable() {
+                active.value = false
                 status.value = "连接失败或已取消"
+                clearStatusLater()
             }
 
             override fun onLost(network: Network) {
+                active.value = false
                 status.value = "热点连接已断开"
                 try { m.bindProcessToNetwork(null) } catch (_: Exception) {}
+                clearStatusLater()
             }
         }
         callback = cb
         m.requestNetwork(req, cb, 30000)
     }
 
+    /** 断开对方热点；系统会自动回到原来的 Wi-Fi */
     fun leave() {
         try { cm?.bindProcessToNetwork(null) } catch (_: Exception) {}
         callback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         callback = null
+        active.value = false
         status.value = ""
     }
 }
