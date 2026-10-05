@@ -4,6 +4,7 @@ import android.os.Environment
 import android.os.StatFs
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.net.Inet4Address
@@ -12,29 +13,26 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.util.Collections
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLSocket
 
 /**
- * 传输协议（TCP，一次连接传一条消息，全程 AES-GCM 加密，握手与加密帧见 Secure.java）：
- *   握手（只有已配对设备能通过）
- *   → 加密帧[头 JSON]
- *   → 对方应答 [1=可以发 | 0+原因=拒绝]
- *   → （仅文件）加密帧[文件内容…]
- *   → （仅文件）对方应答 [1=成功]
- * 头：{v, dev, devName, port, type(ping|text|file), ...}
+ * 传输协议：TLS 1.3 双向认证（只接受已配对设备的证书，见 Tls.java），连接上一次传一条消息：
+ *   加密通道建立 → [头 JSON] → 对方应答 [1=可以发 | 0+原因=拒绝]
+ *   → （仅文件）[文件内容，分帧] → （仅文件）对方应答 [1=成功]
+ * 头：{v, dev, devName, port, type(ping|text|file|pair), ...}
  */
 object Net {
-    class PairResult(val name: String, val key: String)
+    class PairResult(val name: String, val fp: String)
 
     private fun headerBytes(header: JSONObject): ByteArray {
-        header.put("v", 2).put("dev", Store.deviceId).put("devName", Store.deviceName).put("port", Hub.port)
+        header.put("v", 3).put("dev", Store.deviceId).put("devName", Store.deviceName).put("port", Hub.port)
         return header.toString().toByteArray(Charsets.UTF_8)
-    }
-
-    private fun keyOf(p: Peer): ByteArray {
-        if (!p.paired) throw IOException("尚未配对，请扫码重新配对")
-        return Secure.unb64(p.key)
     }
 
     /** 对方的应答帧：第一个字节 1 表示同意/成功，0 表示拒绝，后面是原因 */
@@ -43,23 +41,26 @@ object Net {
         throw IOException(if (b.size > 1) String(b, 1, b.size - 1, Charsets.UTF_8) else "对方拒绝接收")
     }
 
+    /** 连到已配对的设备：只接受配对时记下的那张证书，冒充不了 */
+    private fun connectTo(p: Peer, connectMs: Int, handshakeMs: Int): SSLSocket {
+        if (!p.paired) throw IOException("尚未配对，请扫码重新配对")
+        return Tls.connect(
+            InetSocketAddress(InetAddress.getByName(p.host), p.port), connectMs, handshakeMs, Identity.tls, p.fp
+        )
+    }
+
     fun send(peer: Peer, header: JSONObject, open: (() -> InputStream)?, onProgress: (Long) -> Unit) {
-        val key = keyOf(peer)
-        val s = Socket()
+        val s = connectTo(peer, 6000, 10000)
         try {
-            s.tcpNoDelay = true
-            s.sendBufferSize = 1 shl 20
-            s.connect(InetSocketAddress(InetAddress.getByName(peer.host), peer.port), 6000)
             s.soTimeout = 60000
-            val ses = Secure.connect(s.getInputStream(), s.getOutputStream(), Store.deviceId, peer.id, key, false)
-            val ch = ses.ch
+            val ch = Wire(s.getInputStream(), s.getOutputStream())
             ch.write(headerBytes(header))
             ch.flush()
             // 对方先表态：存储空间不足等会在这里就被拒绝，不用白传
             expectOk(ch.read())
             if (open != null) {
                 open().use { ins ->
-                    val buf = ByteArray(Secure.CHUNK)
+                    val buf = ByteArray(Wire.CHUNK)
                     var total = 0L
                     while (true) {
                         val n = ins.read(buf)
@@ -78,38 +79,64 @@ object Net {
         }
     }
 
-    /** 扫码配对（本机是扫码的一方）：用二维码里的一次性口令和对方握手，成功后得到双方共享的密钥 */
-    fun pair(peerId: String, host: String, port: Int, token: String): PairResult {
-        val s = Socket()
+    @Volatile
+    private var pairSock: Socket? = null
+
+    /** 用户在"等待对方确认"弹窗里点了取消：直接断开连接 */
+    fun cancelPair() {
+        try { pairSock?.close() } catch (_: Exception) {}
+    }
+
+    /**
+     * 扫码配对（本机是扫码的一方）。二维码里有对方的证书指纹，本机直接固定它 —— 中间人冒充不了。
+     * 连上后立刻通过 onCode 给出 6 位验证码（界面显示出来，让人和对方手机上的核对），
+     * 然后等对方点"同意"。成功后双方各自记住对方的证书指纹。
+     */
+    fun pair(peerId: String, host: String, port: Int, token: String, hostFp: String, onCode: (String) -> Unit): PairResult {
+        val tok = Secure.unb64(token)
+        val s = try {
+            Tls.connect(InetSocketAddress(InetAddress.getByName(host), port), 6000, 10000, Identity.tls, hostFp)
+        } catch (e: SSLException) {
+            throw IOException("连上的设备和二维码里的设备不一致，请重新扫码", e)
+        }
+        pairSock = s
         try {
-            s.tcpNoDelay = true
-            s.connect(InetSocketAddress(InetAddress.getByName(host), port), 6000)
-            s.soTimeout = 10000
-            val ses = Secure.connect(s.getInputStream(), s.getOutputStream(), Store.deviceId, peerId, Secure.unb64(token), true)
-            val ch = ses.ch
-            val me = JSONObject().put("name", Store.deviceName).put("port", Hub.port)
-            ch.write(me.toString().toByteArray(Charsets.UTF_8))
-            ch.flush()
-            val r = JSONObject(String(ch.read(), Charsets.UTF_8))
-            if (r.optString("id") != peerId) throw IOException("设备不匹配")
-            return PairResult(r.optString("name"), Secure.b64(ses.pairKey()))
+            val ch = Wire(s.getInputStream(), s.getOutputStream())
+            onCode(Tls.sas(tok, Identity.fp, hostFp))
+            val msg = JSONObject().put("type", "pair")
+                .put("mac", Secure.b64(Tls.pairMac(tok, Identity.fp, hostFp)))
+            val reply = try {
+                ch.write(headerBytes(msg))
+                ch.flush()
+                s.soTimeout = 70_000 // 等对方在它的手机上核对验证码并点"同意"
+                JSONObject(String(ch.read(), Charsets.UTF_8))
+            } catch (e: SSLException) {
+                throw IOException("对方没有在等待配对（请让对方重新打开\u201c我的二维码\u201d页面再扫）", e)
+            } catch (e: EOFException) {
+                throw IOException("对方没有在等待配对（请让对方重新打开\u201c我的二维码\u201d页面再扫）", e)
+            } catch (e: SocketException) {
+                throw IOException("对方没有在等待配对（请让对方重新打开\u201c我的二维码\u201d页面再扫）", e)
+            }
+            if (!reply.optBoolean("ok", false)) throw IOException(reply.optString("reason", "对方拒绝了配对"))
+            if (reply.optString("id") != peerId) throw IOException("设备不匹配")
+            return PairResult(reply.optString("name"), hostFp)
         } finally {
+            pairSock = null
             try { s.close() } catch (_: Exception) {}
         }
     }
 
-    /** 轻量探测：能完成加密握手并得到应答，才算在线（只有持有配对密钥的设备能通过） */
+    /** 轻量探测：能完成 TLS 握手（只有持有配对证书的设备能通过）并得到应答，才算在线 */
     fun ping(p: Peer): Boolean = try {
         if (!p.paired) {
             false
         } else {
-            Socket().use { s ->
-                s.connect(InetSocketAddress(InetAddress.getByName(p.host), p.port), 900)
-                s.soTimeout = 1500
-                val ses = Secure.connect(s.getInputStream(), s.getOutputStream(), Store.deviceId, p.id, Secure.unb64(p.key), false)
-                ses.ch.write(headerBytes(JSONObject().put("type", "ping")))
-                ses.ch.flush()
-                val r = ses.ch.read()
+            connectTo(p, 900, 2500).use { s ->
+                s.soTimeout = 2500
+                val ch = Wire(s.getInputStream(), s.getOutputStream())
+                ch.write(headerBytes(JSONObject().put("type", "ping")))
+                ch.flush()
+                val r = ch.read()
                 r.isNotEmpty() && r[0] == 1.toByte()
             }
         }
@@ -180,8 +207,7 @@ object Server {
     private val slots = Semaphore(16)
 
     private fun open(port: Int): ServerSocket {
-        val s = ServerSocket()
-        s.reuseAddress = true
+        val s = Tls.server(Identity.tls, Hub.trust)
         s.receiveBufferSize = 1 shl 20
         s.bind(InetSocketAddress(port))
         return s
@@ -214,12 +240,12 @@ object Server {
         ss = null
     }
 
-    private fun ok(ch: Secure.Channel) {
+    private fun ok(ch: Wire) {
         ch.write(byteArrayOf(1))
         ch.flush()
     }
 
-    private fun no(ch: Secure.Channel, why: String) {
+    private fun no(ch: Wire, why: String) {
         ch.write(byteArrayOf(0) + why.toByteArray(Charsets.UTF_8))
         ch.flush()
     }
@@ -229,20 +255,24 @@ object Server {
             c.use { s ->
                 s.tcpNoDelay = true
                 s.soTimeout = 8000 // 握手和读头必须在 8 秒内完成，防止有人只连不发、占住连接
-                val ses = Secure.accept(s.getInputStream(), s.getOutputStream(), Store.deviceId, Hub.keys)
-                val ch = ses.ch
+                val ssl = s as SSLSocket
+                ssl.startHandshake() // 对方证书不在信任列表里，握手就会失败
+                val fp = Tls.peerFingerprint(ssl)
+                val ch = Wire(s.getInputStream(), s.getOutputStream())
                 val host = s.inetAddress.hostAddress ?: return
-                if (ses.pairing) {
-                    handlePairing(ses, host)
+                val h = JSONObject(String(ch.read(), Charsets.UTF_8))
+                val type = h.getString("type")
+                if (type == "pair") {
+                    handlePairing(ch, h, fp, host)
                     return
                 }
-                val h = JSONObject(String(ch.read(), Charsets.UTF_8))
-                val pid = ses.peerId
-                if (h.optString("dev") != pid) return // 头里声称的身份必须和握手认证出来的一致
+                val peer = Hub.peerByFp(fp) ?: return // 身份由 TLS 证明，不是靠对方自己声称
+                val pid = peer.id
+                if (h.optString("dev") != pid) return
                 s.soTimeout = 60000
                 val port = h.optInt("port", 0)
                 if (port in 1..65535) Hub.upsertPeer(pid, h.optString("devName"), host, port)
-                when (h.getString("type")) {
+                when (type) {
                     "ping" -> ok(ch)
                     "text" -> {
                         val text = h.getString("text")
@@ -266,23 +296,62 @@ object Server {
 
     private const val MAX_TEXT_LEN = 500_000
 
-    /** 对方扫了本机二维码来配对：能解开对方的第一帧，就证明对方持有二维码里的口令 */
-    private fun handlePairing(ses: Secure.Session, host: String) {
-        val ch = ses.ch
-        val j = JSONObject(String(ch.read(), Charsets.UTF_8))
-        val port = j.getInt("port")
-        require(port in 1..65535)
-        if (!Hub.consumePairToken(ses.secret)) return // 口令只能成功使用一次，且必须是当前这个
-        val key = Secure.b64(ses.pairKey())
-        val me = JSONObject().put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
-        ch.write(me.toString().toByteArray(Charsets.UTF_8))
+    private fun pairReply(ch: Wire, ok: Boolean, reason: String = "") {
+        val j = JSONObject().put("ok", ok)
+        if (ok) j.put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
+        else j.put("reason", reason)
+        ch.write(j.toString().toByteArray(Charsets.UTF_8))
         ch.flush()
-        Hub.addPaired(ses.peerId, j.optString("name"), host, port, key)
-        Hub.helloCount++
-        Hub.hellos.tryEmit(ses.peerId)
     }
 
-    private fun receiveFile(pid: String, h: JSONObject, ch: Secure.Channel) {
+    private val idPattern = Regex("[A-Za-z0-9_-]{1,64}")
+
+    /**
+     * 对方扫了本机二维码来配对。TLS 握手只说明"这是个有证书的设备"，
+     * 还要证明它持有二维码里的一次性口令（凭证绑定了双方证书，转发也没用）。
+     * 但口令可能被偷看/拍下，所以还要弹窗显示 6 位验证码，由人和对方手机上的核对，
+     * 一致并点"同意"之后才真正配对。
+     */
+    private fun handlePairing(ch: Wire, h: JSONObject, guestFp: String, host: String) {
+        val tok = Hub.peekPairToken() ?: return // 没有在等人配对
+        val mac = try { Secure.unb64(h.getString("mac")) } catch (e: Exception) { return }
+        if (!Secure.constantTimeEquals(Tls.pairMac(tok, guestFp, Identity.fp), mac)) return // 口令不对
+        if (!Hub.consumePairToken(tok)) return // 口令只能成功使用一次，且必须是当前这个
+        val id = h.optString("dev")
+        val port = h.getInt("port")
+        require(port in 1..65535)
+        require(idPattern.matches(id) && id != Store.deviceId)
+        // 已经和同一个 ID 配对过、但证书不同：可能是有人冒用，必须先手动删除旧的
+        val old = Hub.peers.value[id]
+        if (old != null && old.paired && old.fp != guestFp) {
+            pairReply(ch, false, "对方已经配对过一个相同 ID 但身份不同的设备，请先在设备列表里删除它，再重新配对")
+            return
+        }
+        // 对方自报的名字只用来显示：去掉控制字符并限制长度
+        val name = h.optString("devName").filter { it >= ' ' && it != '\u007f' }.trim().take(40).ifEmpty { "未知设备" }
+        if (!Hub.pairBusy.compareAndSet(false, true)) {
+            pairReply(ch, false, "对方正在处理另一个配对请求，请稍后再试")
+            return
+        }
+        val prompt = PairPrompt(id, name, Tls.sas(tok, guestFp, Identity.fp), true, CompletableFuture())
+        val approved = try {
+            Hub.pairPrompt.value = prompt
+            try { prompt.decision!!.get(60, TimeUnit.SECONDS) } catch (e: Exception) { false }
+        } finally {
+            if (Hub.pairPrompt.value === prompt) Hub.pairPrompt.value = null
+            Hub.pairBusy.set(false)
+        }
+        if (!approved) {
+            pairReply(ch, false, "对方拒绝了配对，或超时没有确认")
+            return
+        }
+        pairReply(ch, true) // 先告诉对方成功；发不出去就抛异常，本机也不记录
+        Hub.addPaired(id, name, host, port, guestFp)
+        Hub.helloCount++
+        Hub.hellos.tryEmit(id)
+    }
+
+    private fun receiveFile(pid: String, h: JSONObject, ch: Wire) {
         val size = h.getLong("size")
         if (size < 0) {
             no(ch, "文件大小无效")
