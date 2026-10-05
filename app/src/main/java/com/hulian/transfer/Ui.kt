@@ -291,6 +291,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
 
     val title = when {
         peer == null -> "聊天"
+        !peer.paired -> peer.name + "（未配对）"
         peer.online -> peer.name
         else -> peer.name + "（离线）"
     }
