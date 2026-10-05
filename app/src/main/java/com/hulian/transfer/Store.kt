@@ -97,7 +97,7 @@ object Store {
         map.values.forEach { p ->
             arr.put(
                 JSONObject().put("id", p.id).put("name", p.name).put("host", p.host)
-                    .put("port", p.port).put("seen", p.lastSeen)
+                    .put("port", p.port).put("seen", p.lastSeen).put("key", p.key)
             )
         }
         writeAtomic(peerFile, arr.toString())
@@ -107,7 +107,10 @@ object Store {
         val arr = JSONArray(peerFile.readText())
         (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
-            Peer(o.getString("id"), o.getString("name"), o.getString("host"), o.getInt("port"), false, o.optLong("seen"))
+            Peer(
+                o.getString("id"), o.getString("name"), o.getString("host"), o.getInt("port"),
+                false, o.optLong("seen"), o.optString("key")
+            )
         }.associateBy { it.id }
     } catch (e: Exception) {
         emptyMap()
