@@ -103,6 +103,42 @@ fun AppRoot() {
         if (Hub.peers.value.containsKey(id)) openChat(id)
     }
 
+    // 配对确认：两台手机会显示同一个 6 位验证码，核对一致后被扫的一方点"同意"才算配对成功
+    val prompt by Hub.pairPrompt.collectAsState()
+    prompt?.let { p ->
+        val shown = p.code.take(3) + " " + p.code.drop(3)
+        if (p.isHost) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("配对请求") },
+                text = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        Text("\u201c${p.peerName}\u201d请求与本机配对。\n请核对对方手机上显示的验证码，和下面是否一致：", fontSize = 14.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Text(shown, fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp, color = Blue2)
+                        Spacer(Modifier.height(14.dp))
+                        Text("不一致，或者不认识这台设备，请点\u201c拒绝\u201d。", fontSize = 12.sp, color = Gray)
+                    }
+                },
+                confirmButton = { TextButton(onClick = { p.decision?.complete(true) }) { Text("一致，同意") } },
+                dismissButton = { TextButton(onClick = { p.decision?.complete(false) }) { Text("拒绝") } }
+            )
+        } else {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("等待对方确认") },
+                text = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        Text("请让对方核对这个验证码，一致后在对方手机上点\u201c同意\u201d：", fontSize = 14.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Text(shown, fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp, color = Blue2)
+                    }
+                },
+                confirmButton = { TextButton(onClick = { Net.cancelPair() }) { Text("取消") } }
+            )
+        }
+    }
+
     val share by Hub.pendingShare.collectAsState()
     val joinStatus by HotspotJoin.status.collectAsState()
     BackHandler(share != null) { Hub.pendingShare.value = null }
