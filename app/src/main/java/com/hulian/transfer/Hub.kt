@@ -45,6 +45,7 @@ object Hub {
         app = c.applicationContext
         Store.init(app)
         _msgs.value = Store.loadMsgs()
+        Identity.init(app)
         _peers.value = Store.loadPeers()
     }
 
@@ -62,6 +63,13 @@ object Hub {
             Store.savePeers(_peers.value)
         }
     }
+
+    // ---------- 配对确认 ----------
+    /** 当前要弹出的配对确认窗口（被扫的一方：核对验证码并同意；扫码的一方：显示验证码等待） */
+    val pairPrompt = MutableStateFlow<PairPrompt?>(null)
+
+    /** 同一时间只处理一个配对请求 */
+    val pairBusy = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // ---------- 配对口令（二维码里的一次性口令） ----------
     private var tokenBytes: ByteArray? = null
@@ -88,13 +96,20 @@ object Hub {
         return true
     }
 
-    /** 给加密握手用：按设备 id 查配对密钥、取当前口令 */
-    val keys = object : Secure.Keys {
-        override fun keyFor(peerId: String): ByteArray? =
-            _peers.value[peerId]?.takeIf { it.paired }?.let { Secure.unb64(it.key) }
+    /** 当前有效的配对口令（没有在等人配对则为 null） */
+    fun peekPairToken(): ByteArray? = currentPairToken()
 
-        override fun pairToken(): ByteArray? = currentPairToken()
-    }
+    /** 配对窗口：二维码页面打开期间为 true */
+    fun pairingOpen(): Boolean = currentPairToken() != null
+
+    /** 用证书指纹找到已配对的设备（身份靠证书，不靠对方自己声称的 ID） */
+    fun peerByFp(fp: String): Peer? = _peers.value.values.firstOrNull { it.paired && it.fp == fp }
+
+    /**
+     * 给 TLS 服务端用：只接受已配对设备的证书。
+     * "配对窗口"开着时暂时放行陌生证书，由一次性口令 + 人工核对验证码来确认。
+     */
+    val trust = Tls.Trust { fp -> peerByFp(fp) != null || pairingOpen() }
 
     // ---------- 设备 ----------
     /** 已通过加密握手认证的对方：更新它的地址和名字（只处理已配对的设备，陌生设备一律忽略） */
@@ -111,13 +126,13 @@ object Hub {
         if (changed) persistSoon()
     }
 
-    /** 配对成功：记住对方并保存共享密钥 */
-    fun addPaired(id: String, name: String, host: String, port: Int, key: String) {
+    /** 配对成功：记住对方，以及它的证书指纹 */
+    fun addPaired(id: String, name: String, host: String, port: Int, fp: String) {
         if (id == Store.deviceId) return
         _peers.update { map ->
             val old = map[id]
             val n = name.ifEmpty { old?.name ?: "未知设备" }
-            map + (id to Peer(id, n, host, port, true, now(), key))
+            map + (id to Peer(id, n, host, port, true, now(), fp))
         }
         persistSoon()
     }
@@ -147,18 +162,24 @@ object Hub {
     }
 
     /** 扫码配对：用二维码里的一次性口令与对方握手；成功后双方互相记住并共享密钥 */
-    suspend fun pair(id: String, name: String, host: String, port: Int, token: String): Boolean {
+    suspend fun pair(id: String, name: String, host: String, port: Int, token: String, hostFp: String): Boolean {
         if (id == Store.deviceId) {
             toast("不能和自己配对")
             return false
         }
         return try {
-            val r = withContext(Dispatchers.IO) { Net.pair(id, host, port, token) }
-            addPaired(id, r.name.ifEmpty { name }, host, port, r.key)
+            val r = withContext(Dispatchers.IO) {
+                Net.pair(id, host, port, token, hostFp) { code ->
+                    pairPrompt.value = PairPrompt(id, name.ifEmpty { "对方设备" }, code, false, null)
+                }
+            }
+            addPaired(id, r.name.ifEmpty { name }, host, port, r.fp)
             true
         } catch (e: Exception) {
-            toast("配对失败：" + (e.message ?: "请确认两台手机在同一网络，并让对方重新打开二维码页面"))
+            toast("配对失败：" + friendlyError(e))
             false
+        } finally {
+            if (pairPrompt.value?.isHost == false) pairPrompt.value = null
         }
     }
 
