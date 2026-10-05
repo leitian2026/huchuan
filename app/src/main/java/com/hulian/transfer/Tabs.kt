@@ -98,7 +98,7 @@ fun HomeTabs(
                 selected = tab == 0, onClick = { onTab(0) }, colors = itemColors,
                 icon = {
                     BadgedBox(badge = {
-                        if (unreadTotal > 0) Badge { Text(if (unreadTotal > 99) "99+" else "$unreadTotal") }
+                        if (unreadTotal > 0) UnreadBadge(unreadTotal)
                     }) { Icon(Icons.Default.Email, null) }
                 },
                 label = { Text("消息") }
@@ -148,6 +148,22 @@ fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
     }
 }
 
+/** 未读数徽标：一位数是正圆，两位数以上自动拉成胶囊；列表和底部导航共用 */
+@Composable
+fun UnreadBadge(count: Int) {
+    Box(
+        Modifier.height(18.dp).defaultMinSize(minWidth = 18.dp)
+            .clip(RoundedCornerShape(9.dp)).background(Color(0xFFFF4D4F))
+            .padding(horizontal = 5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (count > 99) "99+" else "$count",
+            color = Color.White, fontSize = 11.sp, lineHeight = 11.sp, maxLines = 1
+        )
+    }
+}
+
 // ---------------- 消息：会话列表 ----------------
 
 @Composable
@@ -184,13 +200,9 @@ fun MessagesTab(onChat: (String) -> Unit) {
                         Text(fmtListTime(last.time), fontSize = 12.sp, color = Gray)
                         Spacer(Modifier.height(6.dp))
                         if (unread > 0) {
-                            Box(
-                                Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xFFFF4D4F))
-                                    .padding(horizontal = 6.dp, vertical = 1.dp),
-                                contentAlignment = Alignment.Center
-                            ) { Text(if (unread > 99) "99+" else "$unread", color = Color.White, fontSize = 11.sp) }
+                            UnreadBadge(unread)
                         } else {
-                            Spacer(Modifier.height(16.dp))
+                            Spacer(Modifier.height(18.dp))
                         }
                     }
                 }
