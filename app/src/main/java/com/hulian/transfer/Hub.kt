@@ -57,17 +57,103 @@ object Hub {
         }
     }
 
+    // ---------- 配对口令（二维码里的一次性口令） ----------
+    private var tokenBytes: ByteArray? = null
+    private var tokenExpire = 0L
+
+    /** 生成一次性配对口令（放进二维码）：15 分钟内有效，且只能被成功使用一次 */
+    @Synchronized
+    fun newPairToken(): String {
+        val t = Secure.random(16)
+        tokenBytes = t
+        tokenExpire = now() + 15 * 60_000
+        return Secure.b64(t)
+    }
+
+    @Synchronized
+    private fun currentPairToken(): ByteArray? = if (now() < tokenExpire) tokenBytes else null
+
+    /** 口令验证通过后调用：必须仍是当前口令才算数，并立刻作废 */
+    @Synchronized
+    fun consumePairToken(t: ByteArray): Boolean {
+        val cur = currentPairToken() ?: return false
+        if (!cur.contentEquals(t)) return false
+        tokenBytes = null
+        return true
+    }
+
+    /** 给加密握手用：按设备 id 查配对密钥、取当前口令 */
+    val keys = object : Secure.Keys {
+        override fun keyFor(peerId: String): ByteArray? =
+            _peers.value[peerId]?.takeIf { it.paired }?.let { Secure.unb64(it.key) }
+
+        override fun pairToken(): ByteArray? = currentPairToken()
+    }
+
     // ---------- 设备 ----------
+    /** 已通过加密握手认证的对方：更新它的地址和名字（只处理已配对的设备，陌生设备一律忽略） */
     fun upsertPeer(id: String, name: String, host: String, port: Int) {
         if (id == Store.deviceId) return
         var changed = false
         _peers.update { map ->
-            val old = map[id]
-            val n = name.ifEmpty { old?.name ?: "未知设备" }
-            changed = old == null || old.host != host || old.port != port || old.name != n
-            map + (id to Peer(id, n, host, port, true, now()))
+            val old = map[id] ?: return@update map
+            if (!old.paired) return@update map
+            val n = name.ifEmpty { old.name }
+            changed = old.host != host || old.port != port || old.name != n
+            map + (id to old.copy(name = n, host = host, port = port, online = true, lastSeen = now()))
         }
         if (changed) persistSoon()
+    }
+
+    /** 配对成功：记住对方并保存共享密钥 */
+    fun addPaired(id: String, name: String, host: String, port: Int, key: String) {
+        if (id == Store.deviceId) return
+        _peers.update { map ->
+            val old = map[id]
+            val n = name.ifEmpty { old?.name ?: "未知设备" }
+            map + (id to Peer(id, n, host, port, true, now(), key))
+        }
+        persistSoon()
+    }
+
+    private val verifying = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * 发现层（mDNS / UDP 广播）报告的设备。广播谁都能伪造，所以：
+     * 陌生设备直接忽略；已配对设备地址没变就标为在线；地址变了要先用密钥握手验证，再采用。
+     */
+    fun discovered(id: String, name: String, host: String, port: Int) {
+        if (id == Store.deviceId) return
+        val old = _peers.value[id] ?: return
+        if (!old.paired) return
+        if (old.host == host && old.port == port) {
+            markOnline(id)
+            return
+        }
+        if (!verifying.add(id)) return
+        scope.launch {
+            try {
+                if (Net.ping(old.copy(host = host, port = port))) upsertPeer(id, name, host, port)
+            } finally {
+                verifying.remove(id)
+            }
+        }
+    }
+
+    /** 扫码配对：用二维码里的一次性口令与对方握手；成功后双方互相记住并共享密钥 */
+    suspend fun pair(id: String, name: String, host: String, port: Int, token: String): Boolean {
+        if (id == Store.deviceId) {
+            toast("不能和自己配对")
+            return false
+        }
+        return try {
+            val r = withContext(Dispatchers.IO) { Net.pair(id, host, port, token) }
+            addPaired(id, r.name.ifEmpty { name }, host, port, r.key)
+            true
+        } catch (e: Exception) {
+            toast("配对失败：" + (e.message ?: "请确认两台手机在同一网络，并让对方重新打开二维码页面"))
+            false
+        }
     }
 
     fun markOnline(id: String) {
@@ -93,7 +179,7 @@ object Hub {
     /** 逐个探测已记住但显示离线的设备：能连上就立刻标为在线 */
     fun probeKnown() {
         scope.launch {
-            _peers.value.values.filter { !it.online && it.host.isNotEmpty() }.forEach { p ->
+            _peers.value.values.filter { !it.online && it.paired && it.host.isNotEmpty() }.forEach { p ->
                 launch { if (Net.ping(p)) markOnline(p.id) }
             }
         }
@@ -199,19 +285,13 @@ object Hub {
         if (m.outgoing && m.state == MsgState.FAILED) doSend(m)
     }
 
-    suspend fun hello(peerId: String) {
-        val p = _peers.value[peerId] ?: return
-        try {
-            Net.send(p, JSONObject().put("type", "hello"), null) {}
-        } catch (_: Exception) {}
-    }
-
     private fun doSend(m: Msg) {
         scope.launch {
             patch(m.id) { it.copy(state = MsgState.SENDING, done = 0, error = "") }
             var cleanup: () -> Unit = {}
             try {
                 val peer = _peers.value[m.peerId] ?: throw IllegalStateException("设备不存在")
+                if (!peer.paired) throw IllegalStateException("尚未配对，请扫码重新配对")
                 val h = JSONObject()
                 var total = 0L
                 var open: (() -> InputStream)? = null
