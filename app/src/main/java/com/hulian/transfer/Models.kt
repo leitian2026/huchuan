@@ -12,8 +12,11 @@ data class Peer(
     val host: String,
     val port: Int,
     val online: Boolean = false,
-    val lastSeen: Long = 0L
-)
+    val lastSeen: Long = 0L,
+    val key: String = ""        // 与该设备的配对密钥（base64url）；为空表示尚未配对，不能收发
+) {
+    val paired: Boolean get() = key.isNotEmpty()
+}
 
 data class Msg(
     val id: String,
