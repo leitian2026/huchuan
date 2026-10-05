@@ -49,6 +49,7 @@ object HotspotHost {
                     Hub.touch()
                     payload.value = JSONObject().put("t", "hl").put("ssid", ssid).put("pwd", pwd)
                         .put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
+                        .put("k", Hub.newPairToken())
                         .toString()
                 }
 
@@ -62,7 +63,11 @@ object HotspotHost {
                 }
             }, Handler(Looper.getMainLooper()))
         } catch (e: Exception) {
-            error.value = "无法启动热点：" + (e.message ?: "缺少权限")
+            error.value = if (e is SecurityException) {
+                "创建热点缺少权限（系统要求位置信息权限）。请点下方\u201c去设置\u201d，把\u201c位置信息\u201d和\u201c附近设备\u201d都设为允许，并确认系统的定位开关已打开"
+            } else {
+                "无法启动热点：" + (e.message ?: "未知错误")
+            }
         }
     }
 
@@ -89,7 +94,7 @@ object HotspotJoin {
         }
     }
 
-    fun join(ctx: Context, ssid: String, pwd: String, peerId: String, peerName: String, port: Int) {
+    fun join(ctx: Context, ssid: String, pwd: String, peerId: String, peerName: String, port: Int, token: String) {
         leave()
         Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -119,10 +124,9 @@ object HotspotJoin {
                 Hub.touch()
                 status.value = ""
                 Hub.toast("已连接到对方热点")
-                Hub.upsertPeer(peerId, peerName, gw, port)
                 Hub.scope.launch {
-                    Hub.hello(peerId)
-                    connected.value = peerId
+                    // 用二维码里的一次性口令配对；失败的原因 Hub.pair 会弹提示
+                    if (Hub.pair(peerId, peerName, gw, port, token)) connected.value = peerId
                 }
             }
 
