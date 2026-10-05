@@ -49,7 +49,7 @@ object HotspotHost {
                     Hub.touch()
                     payload.value = JSONObject().put("t", "hl").put("ssid", ssid).put("pwd", pwd)
                         .put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
-                        .put("k", Hub.newPairToken())
+                        .put("k", Hub.newPairToken()).put("fp", Identity.fp)
                         .toString()
                 }
 
@@ -94,7 +94,7 @@ object HotspotJoin {
         }
     }
 
-    fun join(ctx: Context, ssid: String, pwd: String, peerId: String, peerName: String, port: Int, token: String) {
+    fun join(ctx: Context, ssid: String, pwd: String, peerId: String, peerName: String, port: Int, token: String, hostFp: String) {
         leave()
         Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -126,7 +126,7 @@ object HotspotJoin {
                 Hub.toast("已连接到对方热点")
                 Hub.scope.launch {
                     // 用二维码里的一次性口令配对；失败的原因 Hub.pair 会弹提示
-                    if (Hub.pair(peerId, peerName, gw, port, token)) connected.value = peerId
+                    if (Hub.pair(peerId, peerName, gw, port, token, hostFp)) connected.value = peerId
                 }
             }
 
