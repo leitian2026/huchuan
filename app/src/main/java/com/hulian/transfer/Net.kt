@@ -250,8 +250,9 @@ object Server {
                             no(ch, "文字太长")
                         } else {
                             Hub.addMsg(
-                                Msg(newId(), pid, false, Kind.TEXT, now(), text = text, read = Hub.openPeer == pid)
+                                Msg(newId(), pid, false, Kind.TEXT, now(), text = text, read = Hub.isViewing(pid))
                             )
+                            Notifier.message(pid, text)
                             ok(ch)
                         }
                     }
@@ -301,7 +302,7 @@ object Server {
             Msg(
                 id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
                 name = title, file = fname, size = size, state = MsgState.RECEIVING,
-                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.openPeer == pid
+                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
             )
         )
         val saved: Saver.Out = try {
@@ -331,6 +332,7 @@ object Server {
             }
             val u = saved.uri.toString()
             Hub.patch(id) { it.copy(state = MsgState.DONE, done = size, uri = u) }
+            Notifier.message(pid, (if (isApp) "收到应用：" else "收到文件：") + title)
             ok(ch)
         } catch (e: Exception) {
             Saver.delete(Hub.app, saved.uri)
