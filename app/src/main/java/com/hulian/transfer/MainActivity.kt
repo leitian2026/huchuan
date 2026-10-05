@@ -1,6 +1,8 @@
 package com.hulian.transfer
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -8,10 +10,33 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
+    private val notifPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private var askedNotif = false
+
+    override fun onStart() {
+        super.onStart()
+        Hub.appVisible = true
+        // 回到前台时，正在看的聊天里在后台期间收到的消息算已读，并清掉对应通知
+        Hub.openPeer?.let { Hub.markRead(it) }
+        // Android 13+：之前拒绝过通知权限的话，每次启动再请求一次（系统若已永久拒绝则不会弹窗）
+        if (Build.VERSION.SDK_INT >= 33 && Store.permsAsked && !askedNotif &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedNotif = true
+            notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onStop() {
+        Hub.appVisible = false
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // 状态栏透明，让顶部渐变条一直延伸到屏幕最上面，颜色完全一致
         enableEdgeToEdge(
@@ -22,13 +47,17 @@ class MainActivity : ComponentActivity() {
         setContent { HulianTheme { AppRoot() } }
         // 前台服务不依赖通知权限，直接启动；权限在首次使用时由界面统一说明并申请
         ContextCompat.startForegroundService(this, Intent(this, TransferService::class.java))
-        if (savedInstanceState == null) readShare(intent)?.let { Hub.pendingShare.value = it }
+        if (savedInstanceState == null) {
+            readShare(intent)?.let { Hub.pendingShare.value = it }
+            intent.getStringExtra("peer")?.let { Hub.openChatRequest.value = it }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         readShare(intent)?.let { Hub.pendingShare.value = it }
+        intent.getStringExtra("peer")?.let { Hub.openChatRequest.value = it }
     }
 
     @Suppress("DEPRECATION")
