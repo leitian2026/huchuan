@@ -47,7 +47,8 @@ object Pairing {
             return
         }
         val k = j.optString("k")
-        if (k.isEmpty()) {
+        val fp = j.optString("fp")
+        if (k.isEmpty() || fp.isEmpty()) {
             Hub.toast("这个二维码来自旧版本，请让对方更新互传后再扫")
             return
         }
@@ -55,7 +56,7 @@ object Pairing {
             if (j.has("ssid")) {
                 HotspotJoin.join(
                     ctx, j.getString("ssid"), j.getString("pwd"),
-                    j.getString("id"), j.optString("name"), j.getInt("port"), k
+                    j.getString("id"), j.optString("name"), j.getInt("port"), k, fp
                 )
             } else {
                 val id = j.getString("id")
@@ -63,7 +64,7 @@ object Pairing {
                 val ip = j.getString("ip")
                 val port = j.getInt("port")
                 Hub.scope.launch {
-                    if (Hub.pair(id, name, ip, port, k)) withContext(Dispatchers.Main) { onChat(id) }
+                    if (Hub.pair(id, name, ip, port, k, fp)) withContext(Dispatchers.Main) { onChat(id) }
                 }
             }
         } catch (e: Exception) {
