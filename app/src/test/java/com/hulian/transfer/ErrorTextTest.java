@@ -67,4 +67,25 @@ public class ErrorTextTest {
         assertEquals("未知错误，请重试", ErrorText.friendly("", ""));
         assertEquals("未知错误，请重试", ErrorText.friendly(null, null));
     }
+
+    @Test
+    public void 主动取消显示已取消() {
+        assertEquals("已取消", ErrorText.friendly("Socket closed", "java.net.SocketException"));
+    }
+
+    @Test
+    public void 证书不符或被对方删除时提示重新配对() {
+        assertTrue(ErrorText.friendly("Received fatal alert: bad_certificate", "javax.net.ssl.SSLHandshakeException")
+                .startsWith("安全验证失败"));
+        assertTrue(ErrorText.friendly("Remote host terminated the handshake", "javax.net.ssl.SSLHandshakeException")
+                .startsWith("安全验证失败"));
+        assertTrue(ErrorText.friendly("SSL handshake aborted: ssl=0x1: Failure in SSL library, error:CERTIFICATE_VERIFY_FAILED",
+                "javax.net.ssl.SSLHandshakeException").startsWith("安全验证失败"));
+        assertTrue(ErrorText.friendly("", "javax.net.ssl.SSLPeerUnverifiedException").startsWith("安全验证失败"));
+    }
+
+    @Test
+    public void SSL异常里的连接重置仍然显示连接中断() {
+        assertEquals("连接被中断，请重试", ErrorText.friendly("Connection reset", "javax.net.ssl.SSLException"));
+    }
 }
