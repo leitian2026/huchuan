@@ -104,21 +104,24 @@ fun MyQrScreen(onBack: () -> Unit) {
     val hsErr by HotspotHost.error.collectAsState()
     var lan by remember { mutableStateOf<String?>(null) }
     val startHello = remember { Hub.helloCount }
-    val wifiPerm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.NEARBY_WIFI_DEVICES else Manifest.permission.ACCESS_FINE_LOCATION
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) HotspotHost.start(ctx) else HotspotHost.error.value = "需要\u201c附近设备/定位\u201d权限才能创建热点"
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        if (hotspotPermsMissing(ctx).isEmpty()) HotspotHost.start(ctx)
+        else HotspotHost.error.value = "创建热点需要\u201c附近设备\u201d和\u201c位置信息\u201d权限。请点下方\u201c去设置\u201d，在权限里都设为允许后返回重试"
+    }
+    // 没有 Wi-Fi 时：先补齐权限，再创建临时热点
+    fun startHotspot() {
+        HotspotHost.error.value = null
+        val miss = hotspotPermsMissing(ctx)
+        if (miss.isEmpty()) HotspotHost.start(ctx) else permLauncher.launch(miss.toTypedArray())
     }
     LaunchedEffect(Unit) {
         val ip = Net.wifiIp()
         if (ip != null) {
             // 已连 Wi-Fi：直接显示局域网二维码
             lan = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-                .put("name", Store.deviceName).put("port", Hub.port).toString()
-        } else if (ContextCompat.checkSelfPermission(ctx, wifiPerm) == PackageManager.PERMISSION_GRANTED) {
-            // 没有 Wi-Fi：自动创建临时热点
-            HotspotHost.start(ctx)
+                .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).toString()
         } else {
-            permLauncher.launch(wifiPerm)
+            startHotspot()
         }
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
@@ -144,14 +147,20 @@ fun MyQrScreen(onBack: () -> Unit) {
                     else "让对方打开互传，点“扫一扫”扫这个码\n（已创建临时热点，不耗流量；对方会暂时离开原来的 Wi-Fi）",
                     color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
                 )
-                Text("对方连上后会自动进入聊天", color = Gray, fontSize = 12.sp)
+                Text("配对成功后会自动进入聊天（二维码 15 分钟内有效，只能配对一次）", color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
             } else if (hsErr == null) {
                 CircularProgressIndicator()
                 Text("正在准备…", color = Gray, fontSize = 14.sp)
             }
             hsErr?.let {
                 Text(it, color = Color(0xFFE5484D), fontSize = 13.sp, textAlign = TextAlign.Center)
-                Button(onClick = { HotspotHost.start(ctx) }) { Text("重试") }
+                Button(onClick = { startHotspot() }) { Text("重试") }
+                OutlinedButton(onClick = {
+                    ctx.startActivity(
+                        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                            .setData(Uri.parse("package:" + ctx.packageName))
+                    )
+                }) { Text("去设置") }
             }
         }
     }
@@ -187,7 +196,7 @@ fun ShareScreen(share: Share, onDone: (String?) -> Unit) {
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(p.name, fontSize = 17.sp)
-                            Text(if (p.online) "[在线]" else "[离线]", fontSize = 13.sp, color = Gray)
+                            Text(if (!p.paired) "[未配对]" else if (p.online) "[在线]" else "[离线]", fontSize = 13.sp, color = Gray)
                         }
                     }
                     HorizontalDivider(color = Color(0xFFF1F2F5))
