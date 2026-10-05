@@ -23,6 +23,7 @@ public final class ErrorText {
         if (exClass == null) exClass = "";
         if (hasCjk(raw)) return raw;
 
+        if (has(raw, "Socket closed")) return "已取消";
         if (has(raw, "EHOSTUNREACH", "No route to host") || exClass.endsWith("NoRouteToHostException")) {
             return "找不到对方：对方可能已离开当前网络、关闭了 Wi-Fi，或 IP 地址已变化。请确认两台手机在同一网络后重试";
         }
@@ -38,6 +39,14 @@ public final class ErrorText {
         if (has(raw, "EPIPE", "Broken pipe", "ECONNRESET", "Connection reset", "ECONNABORTED",
                 "Software caused connection abort") || exClass.endsWith("EOFException")) {
             return "连接被中断，请重试";
+        }
+        if (exClass.endsWith("SSLException") || exClass.endsWith("SSLHandshakeException")
+                || exClass.endsWith("SSLProtocolException") || exClass.endsWith("SSLPeerUnverifiedException")
+                || exClass.endsWith("SSLKeyException")
+                || has(raw, "Received fatal alert", "certificate_required", "bad_certificate", "unknown_ca",
+                "handshake_failure", "Handshake failed", "SSL handshake", "CERTIFICATE_VERIFY_FAILED",
+                "SSLV3_ALERT", "TLSV1_ALERT", "Remote host terminated the handshake")) {
+            return "安全验证失败：对方的身份与配对时不一致，或对方已经删除了本机。请两边都删除对方后重新扫码配对";
         }
         if (has(raw, "ENOSPC", "No space left")) {
             return "存储空间不足";
