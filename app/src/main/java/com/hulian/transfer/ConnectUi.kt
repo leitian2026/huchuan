@@ -119,7 +119,7 @@ fun MyQrScreen(onBack: () -> Unit) {
         if (ip != null) {
             // 已连 Wi-Fi：直接显示局域网二维码
             lan = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-                .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).toString()
+                .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).toString()
         } else {
             startHotspot()
         }
@@ -147,7 +147,7 @@ fun MyQrScreen(onBack: () -> Unit) {
                     else "让对方打开互传，点“扫一扫”扫这个码\n（已创建临时热点，不耗流量；对方会暂时离开原来的 Wi-Fi）",
                     color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
                 )
-                Text("配对成功后会自动进入聊天（二维码 15 分钟内有效，只能配对一次）", color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
+                Text("对方扫码后，两台手机会显示同一个验证码，核对一致再点\u201c同意\u201d。二维码 15 分钟内有效，只能用一次", color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
             } else if (hsErr == null) {
                 CircularProgressIndicator()
                 Text("正在准备…", color = Gray, fontSize = 14.sp)
