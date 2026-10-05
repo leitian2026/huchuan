@@ -28,7 +28,13 @@ object Hub {
 
     @Volatile var port = 0
     @Volatile var discovery: Discovery? = null
-    @Volatile var openPeer: String? = null      // 当前正在查看的聊天对象
+    @Volatile var openPeer: String? = null      // 当前打开的聊天对象
+    @Volatile var appVisible = false            // 应用界面当前是否在前台可见（退到桌面/锁屏后为 false）
+    /** 点击通知后要打开的聊天（界面收到后清空） */
+    val openChatRequest = MutableStateFlow<String?>(null)
+
+    /** 用户此刻正在看着这个聊天：界面在前台，并且打开的就是它 */
+    fun isViewing(peerId: String) = appVisible && openPeer == peerId
     @Volatile var helloCount = 0
     @Volatile var lastActivity = 0L
 
@@ -245,6 +251,7 @@ object Hub {
     }
 
     fun markRead(peerId: String) {
+        Notifier.cancel(peerId)
         if (_msgs.value.none { it.peerId == peerId && !it.outgoing && !it.read }) return
         _msgs.update { l -> l.map { if (it.peerId == peerId && !it.outgoing && !it.read) it.copy(read = true) else it } }
         persistSoon()
@@ -327,7 +334,7 @@ object Hub {
                 }
                 patch(m.id) { it.copy(state = MsgState.DONE, done = t) }
             } catch (e: Exception) {
-                patch(m.id) { it.copy(state = MsgState.FAILED, error = e.message ?: "发送失败") }
+                patch(m.id) { it.copy(state = MsgState.FAILED, error = friendlyError(e)) }
             } finally {
                 cleanup()
             }
