@@ -116,7 +116,7 @@ class Discovery(ctx: Context) {
         val name = si.attributes["name"]?.let { String(it, Charsets.UTF_8) } ?: "未知设备"
         val host = si.host?.hostAddress ?: return
         synchronized(names) { names[si.serviceName] = id }
-        Hub.upsertPeer(id, name, host, si.port)
+        Hub.discovered(id, name, host, si.port)
     }
 }
 
@@ -175,7 +175,7 @@ class Beacon(private val ctx: Context) {
                 val id = j.getString("id")
                 if (id == Store.deviceId) continue
                 val host = pkt.address.hostAddress ?: continue
-                Hub.upsertPeer(id, j.optString("name"), host, j.getInt("port"))
+                Hub.discovered(id, j.optString("name"), host, j.getInt("port"))
             } catch (e: Exception) {
                 if (s.isClosed) break
             }
