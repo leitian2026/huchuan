@@ -95,6 +95,14 @@ fun AppRoot() {
     fun openChat(id: String) { stack = listOf(Screen.Home, Screen.Chat(id)) }
     BackHandler(stack.size > 1) { pop() }
 
+    // 点击状态栏通知：直接打开对应的聊天
+    val chatReq by Hub.openChatRequest.collectAsState()
+    LaunchedEffect(chatReq) {
+        val id = chatReq ?: return@LaunchedEffect
+        Hub.openChatRequest.value = null
+        if (Hub.peers.value.containsKey(id)) openChat(id)
+    }
+
     val share by Hub.pendingShare.collectAsState()
     val joinStatus by HotspotJoin.status.collectAsState()
     BackHandler(share != null) { Hub.pendingShare.value = null }
@@ -270,7 +278,8 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         Hub.markRead(peerId)
         onDispose { if (Hub.openPeer == peerId) Hub.openPeer = null }
     }
-    LaunchedEffect(all.size) { Hub.markRead(peerId) }
+    // 只有界面在前台时才算"已读"；退到桌面后收到的消息要保持未读，才会有通知和未读数
+    LaunchedEffect(all.size) { if (Hub.appVisible) Hub.markRead(peerId) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.forEach {
@@ -386,7 +395,7 @@ fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
             }
             if (m.state == MsgState.FAILED && out) {
                 Text(
-                    "发送失败：${m.error}（点击重试）", color = Color(0xFFE5484D), fontSize = 12.sp,
+                    "发送失败：${friendlyError(m.error)}（点击重试）", color = Color(0xFFE5484D), fontSize = 12.sp,
                     modifier = Modifier.clickable(onClick = onClick).padding(top = 2.dp)
                 )
             }
