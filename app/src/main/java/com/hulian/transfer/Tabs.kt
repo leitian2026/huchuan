@@ -238,7 +238,7 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
         if (list.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (peers.isEmpty()) "还没有设备\n两台手机连同一个 Wi-Fi 并打开本应用即可自动出现" else "没有匹配的设备",
+                    if (peers.isEmpty()) "还没有设备\n点上面的\u201c添加设备（扫码）\u201d，用另一台手机扫码配对一次，之后同一网络下会自动出现" else "没有匹配的设备",
                     color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
                 )
             }
@@ -254,7 +254,7 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
                         Column(Modifier.weight(1f)) {
                             Text(p.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
-                                if (p.online) "[在线] ${p.host}" else "[离线] 上次在线 ${fmtListTime(p.lastSeen)}",
+                                if (!p.paired) "[未配对] 请删除后重新扫码配对" else if (p.online) "[在线] ${p.host}" else "[离线] 上次在线 ${fmtListTime(p.lastSeen)}",
                                 fontSize = 13.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
                         }
