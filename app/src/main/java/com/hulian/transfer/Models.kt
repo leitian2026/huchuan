@@ -13,9 +13,9 @@ data class Peer(
     val port: Int,
     val online: Boolean = false,
     val lastSeen: Long = 0L,
-    val key: String = ""        // 与该设备的配对密钥（base64url）；为空表示尚未配对，不能收发
+    val fp: String = ""         // 配对时记下的对方证书指纹（身份）；为空表示尚未配对，不能收发
 ) {
-    val paired: Boolean get() = key.isNotEmpty()
+    val paired: Boolean get() = fp.isNotEmpty()
 }
 
 data class Msg(
@@ -42,3 +42,12 @@ data class Share(val uris: List<Uri>, val text: String?)
 
 fun now() = System.currentTimeMillis()
 fun newId() = UUID.randomUUID().toString()
+
+/** 配对确认弹窗的数据：isHost=本机是被扫的一方（要核对验证码并点同意）；否则是扫码的一方（只显示验证码，等对方确认） */
+class PairPrompt(
+    val peerId: String,
+    val peerName: String,
+    val code: String,
+    val isHost: Boolean,
+    val decision: java.util.concurrent.CompletableFuture<Boolean>?
+)
