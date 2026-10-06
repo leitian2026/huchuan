@@ -87,7 +87,6 @@ object HotspotHost {
                     starting = false
                     payload.value = null
                     error.value = "热点启动失败（代码 $reason）。请确认已打开系统的\u201c定位\u201d开关，并关闭本机正在使用的个人热点后重试。也可以不用本功能：自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
-                    AutoLink.hostFailed(ctx.applicationContext)
                 }
             }, Handler(Looper.getMainLooper()))
         } catch (e: Exception) {
@@ -97,7 +96,6 @@ object HotspotHost {
             } else {
                 "无法启动热点：" + (e.message ?: "未知错误")
             }
-            AutoLink.hostFailed(ctx.applicationContext)
         }
     }
 
@@ -128,6 +126,8 @@ object HotspotJoin {
     val needPerm = MutableStateFlow<JoinParams?>(null)
     /** 自动连接用不了（没权限 / 被系统拒绝 / 超时）：让用户手动连，连上后继续配对 */
     val manual = MutableStateFlow<JoinParams?>(null)
+    /** 当前这次连接是自动连接（打开 app 自动连固定热点）：空闲不自动断 */
+    @Volatile var autoMode = false
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var cm: ConnectivityManager? = null
 
@@ -146,6 +146,7 @@ object HotspotJoin {
     /** auto=true：打开 app 时自动连对方的固定热点。已配对，所以不再走一次性口令，只验证身份并刷新对方地址；也不跳转聊天。done 用来告诉调用方这次成没成 */
     fun join(ctx: Context, p: JoinParams, auto: Boolean = false, done: kotlinx.coroutines.CompletableDeferred<Boolean>? = null) {
         leave()
+        autoMode = auto
         Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
         cm = m
@@ -349,6 +350,7 @@ object HotspotJoin {
         callback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         callback = null
         active.value = false
+        autoMode = false
         status.value = ""
     }
 }
