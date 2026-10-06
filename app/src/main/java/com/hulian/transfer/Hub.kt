@@ -23,6 +23,18 @@ object Hub {
 
     /** 有设备主动向本机"打招呼"（对方扫了本机二维码）时发出其 id */
     val hellos = MutableSharedFlow<String>(extraBufferCapacity = 8)
+
+    /** 对方退出了和本机的对话框（收到对方的 bye） */
+    val peerLeft = MutableSharedFlow<String>(extraBufferCapacity = 8)
+
+    /** 正在发送的 bye：断开热点前要先等它发完，不然网先断了对方收不到 */
+    @Volatile var byeJob: Job? = null
+
+    /** 本机退出和某台设备的对话框：通知对方一起退出（对方不在线就不发） */
+    fun sendBye(id: String) {
+        val p = _peers.value[id]?.takeIf { it.paired && it.online } ?: return
+        byeJob = scope.launch { Net.bye(p) }
+    }
     /** 从系统分享菜单收到、等待选择设备的内容 */
     val pendingShare = MutableStateFlow<Share?>(null)
 
