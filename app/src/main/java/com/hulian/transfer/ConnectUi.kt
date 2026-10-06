@@ -146,7 +146,7 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
     DisposableEffect(Unit) {
-        onDispose { if (Hub.helloCount == startHello && !AutoLink.running) HotspotHost.stop() }
+        onDispose { if (Hub.helloCount == startHello) HotspotHost.stop() }
     }
 
     val payload = lan ?: hsPayload
