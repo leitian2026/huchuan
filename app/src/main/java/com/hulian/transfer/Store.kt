@@ -50,6 +50,21 @@ object Store {
         get() = prefs.getInt("port", 0)
         set(v) { prefs.edit().putInt("port", v).apply() }
 
+    /** 自动热点：本机上次的角色。"host"=开热点的一方，"guest"=扫码连热点的一方，""=没用过热点 */
+    var linkRole: String
+        get() = prefs.getString("linkRole", "") ?: ""
+        set(v) { prefs.edit().putString("linkRole", v).apply() }
+
+    /** 定位开关是不是本 app 打开的（退出时只关自己开的；用户自己开的不记这里） */
+    var ownLocation: Boolean
+        get() = prefs.getBoolean("ownLoc", false)
+        set(v) { prefs.edit().putBoolean("ownLoc", v).apply() }
+
+    /** 作为“客人”上次连过的热点（名称、密码、对方信息），下次打开直接连，不用再扫码 */
+    var lastJoin: String?
+        get() = prefs.getString("lastJoin", null)
+        set(v) { prefs.edit().putString("lastJoin", v).apply() }
+
     private val msgFile get() = File(ctx.filesDir, "msgs.json")
     private val peerFile get() = File(ctx.filesDir, "peers.json")
 
