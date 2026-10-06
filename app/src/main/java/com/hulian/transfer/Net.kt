@@ -164,6 +164,17 @@ object Net {
         null
     }
 
+    /** 系统里是否已经有热点在运行（手动开的 / 别的软件开的 / 本 app 的本地热点），看热点网卡是否有 IPv4 */
+    fun apActive(): Boolean = try {
+        Collections.list(NetworkInterface.getNetworkInterfaces()).any { n ->
+            n.isUp && !n.isLoopback &&
+                (n.name.startsWith("swlan") || n.name.startsWith("softap") || n.name.startsWith("ap")) &&
+                Collections.list(n.inetAddresses).any { it is Inet4Address }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
     fun localIps(): List<String> = try {
         Collections.list(NetworkInterface.getNetworkInterfaces())
             .filter { it.isUp && !it.isLoopback }
