@@ -144,6 +144,21 @@ object Net {
         false
     }
 
+    /** 通知对方“我退出对话框了”：尽力而为，失败（比如网已经断了）就算了 */
+    fun bye(p: Peer) {
+        try {
+            if (!p.paired) return
+            connectTo(p, 900, 2500).use { s ->
+                s.soTimeout = 2500
+                val ch = Wire(s.getInputStream(), s.getOutputStream())
+                ch.write(headerBytes(JSONObject().put("type", "bye")))
+                ch.flush()
+                ch.read()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     /**
      * 本机当前所在的局域网 IPv4：优先 Wi-Fi 网卡(wlan*)，其次本机热点网卡(ap* / swlan* / softap*，
      * 本机开了个人热点时用)；忽略移动网络和 VPN 网卡。没有则返回 null（开着 VPN 也能正确判断）
@@ -285,6 +300,10 @@ object Server {
                 if (port in 1..65535) Hub.upsertPeer(pid, h.optString("devName"), host, port)
                 when (type) {
                     "ping" -> ok(ch)
+                    "bye" -> {
+                        ok(ch)
+                        Hub.peerLeft.tryEmit(pid) // 对方退出了对话框：本机如果正开着和它的对话框，也一起退出
+                    }
                     "text" -> {
                         val text = h.getString("text")
                         if (text.length > MAX_TEXT_LEN) {
