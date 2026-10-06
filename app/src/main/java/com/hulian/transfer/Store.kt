@@ -103,6 +103,7 @@ object Store {
             arr.put(
                 JSONObject().put("id", p.id).put("name", p.name).put("host", p.host)
                     .put("port", p.port).put("seen", p.lastSeen).put("fp", p.fp)
+                    .also { o -> p.iHost?.let { o.put("ih", it) } }
             )
         }
         writeAtomic(peerFile, arr.toString())
@@ -114,7 +115,8 @@ object Store {
             val o = arr.getJSONObject(i)
             Peer(
                 o.getString("id"), o.getString("name"), o.getString("host"), o.getInt("port"),
-                false, o.optLong("seen"), o.optString("fp")
+                false, o.optLong("seen"), o.optString("fp"),
+                if (o.has("ih")) o.getBoolean("ih") else null
             )
         }.associateBy { it.id }
     } catch (e: Exception) {
