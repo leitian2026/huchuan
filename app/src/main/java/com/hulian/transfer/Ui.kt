@@ -55,6 +55,9 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -90,10 +93,49 @@ fun AppRoot() {
     val ctx = LocalContext.current
     var stack by remember { mutableStateOf<List<Screen>>(listOf(Screen.Home)) }
     var tab by remember { mutableStateOf(0) }
-    fun push(s: Screen) { stack = stack + s }
-    fun pop() { if (stack.size > 1) stack = stack.dropLast(1) }
-    fun openChat(id: String) { stack = listOf(Screen.Home, Screen.Chat(id)) }
+    fun chatOf(s: List<Screen>): String? = s.filterIsInstance<Screen.Chat>().lastOrNull()?.peerId
+    // 所有页面切换都走这里：离开某个对话框时（bye=true）通知对方也退出；
+    // 因为对方退出 / 断线而退出的（bye=false）不用再通知
+    fun setStack(new: List<Screen>, bye: Boolean = true) {
+        val old = chatOf(stack)
+        if (bye && old != null && old != chatOf(new)) Hub.sendBye(old)
+        stack = new
+    }
+    fun push(s: Screen) { setStack(stack + s) }
+    fun pop() { if (stack.size > 1) setStack(stack.dropLast(1)) }
+    fun openChat(id: String) { setStack(listOf(Screen.Home, Screen.Chat(id))) }
     BackHandler(stack.size > 1) { pop() }
+
+    // 对方退出了和本机的对话框：本机也退出
+    LaunchedEffect(Unit) {
+        Hub.peerLeft.collect { id ->
+            if (chatOf(stack) == id) setStack(listOf(Screen.Home), bye = false)
+        }
+    }
+
+    // 对话框里已经连上过对方，之后连接断了：每 2 秒核对一次、共 6 次，都连不上就自动退出对话框
+    val chatId = chatOf(stack)
+    LaunchedEffect(chatId) {
+        val id = chatId ?: return@LaunchedEffect
+        var wasOnline = false
+        Hub.peers.map { it[id]?.online == true }.distinctUntilChanged().collect { on ->
+            if (on) {
+                wasOnline = true
+                return@collect
+            }
+            if (!wasOnline) return@collect
+            for (i in 0 until 6) {
+                delay(2000)
+                val p = Hub.peers.value[id] ?: return@collect
+                if (p.online) return@collect
+                if (withContext(Dispatchers.IO) { Net.ping(p) }) {
+                    Hub.markOnline(id)
+                    return@collect
+                }
+            }
+            setStack(listOf(Screen.Home), bye = false)
+        }
+    }
 
     // 点击状态栏通知：直接打开对应的聊天
     val chatReq by Hub.openChatRequest.collectAsState()
