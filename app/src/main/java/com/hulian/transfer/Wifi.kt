@@ -128,6 +128,8 @@ object HotspotJoin {
     val manual = MutableStateFlow<JoinParams?>(null)
     /** 当前这次连接是自动连接（打开 app 自动连固定热点）：空闲不自动断 */
     @Volatile var autoMode = false
+    /** 已经真正连上对方的热点（拿到了网关地址）；active 只表示“正在连或已连上” */
+    @Volatile var linked = false
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var cm: ConnectivityManager? = null
 
@@ -173,6 +175,7 @@ object HotspotJoin {
                 }
                 if (gw == null) return
                 finished = true
+                linked = true
                 Hub.touch()
                 status.value = ""
                 Hub.toast("已连接到对方热点")
@@ -187,6 +190,7 @@ object HotspotJoin {
             }
 
             override fun onUnavailable() {
+                linked = false
                 active.value = false
                 status.value = ""
                 if (auto) {
@@ -198,6 +202,7 @@ object HotspotJoin {
             }
 
             override fun onLost(network: Network) {
+                linked = false
                 active.value = false
                 done?.complete(false)
                 if (!auto) status.value = "热点连接已断开"
@@ -349,6 +354,7 @@ object HotspotJoin {
         try { cm?.bindProcessToNetwork(null) } catch (_: Exception) {}
         callback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         callback = null
+        linked = false
         active.value = false
         autoMode = false
         status.value = ""
