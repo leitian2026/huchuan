@@ -376,7 +376,7 @@ object Server {
             return
         }
         pairReply(ch, true) // 先告诉对方成功；发不出去就抛异常，本机也不记录
-        Hub.addPaired(id, name, host, port, guestFp)
+        Hub.addPaired(id, name, host, port, guestFp, iHost = true)  // 开二维码的一方：以后由本机建热点
         Hub.helloCount++
         Hub.hellos.tryEmit(id)
     }
