@@ -87,6 +87,9 @@ object DirectGroup {
     @Volatile var starting = false
         private set
 
+    /** 创建到一半被取消（比如同时扫描时发现对方热点已经在了）：创建成功的回调里把它撤掉 */
+    @Volatile private var abort = false
+
     private fun reasonText(r: Int) = when (r) {
         WifiP2pManager.P2P_UNSUPPORTED -> "本机不支持 Wi-Fi Direct"
         WifiP2pManager.BUSY -> "Wi-Fi Direct 正忙（可能本机正连着 Wi-Fi 且芯片不能同时用，或有别的 Wi-Fi Direct 连接）"
@@ -101,6 +104,7 @@ object DirectGroup {
         val c = m.initialize(app, Looper.getMainLooper(), null)
         mgr = m
         ch = c
+        abort = false
         starting = true
         // 系统偶尔一直不回调：15 秒还没出结果就当失败，别让界面一直卡在“正在创建”
         Handler(Looper.getMainLooper()).postDelayed({
@@ -113,6 +117,12 @@ object DirectGroup {
             m.requestGroupInfo(c) { g ->
                 if (g != null && g.networkName == cred.ssid) {
                     // 已经是我们的群组（上次没来得及关）：直接沿用
+                    if (abort) {
+                        abort = false
+                        try { m.removeGroup(c, null) } catch (_: Exception) {}
+                        starting = false
+                        return@requestGroupInfo
+                    }
                     up.value = true
                     starting = false
                 } else if (g != null) {
@@ -136,6 +146,12 @@ object DirectGroup {
                 .enablePersistentMode(false).build()
             m.createGroup(c, cfg, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
+                    if (abort) {
+                        abort = false
+                        try { m.removeGroup(c, null) } catch (_: Exception) {}
+                        starting = false
+                        return
+                    }
                     up.value = true
                     starting = false
                 }
@@ -169,6 +185,7 @@ object DirectGroup {
         if (up.value && m != null && c != null) {
             try { m.removeGroup(c, null) } catch (_: Exception) {}
         }
+        if (starting) abort = true   // 还在创建：等创建回调回来再撤掉
         up.value = false
         starting = false
     }
@@ -182,7 +199,7 @@ data class LinkStatus(val kind: LinkKind, val text: String, val action: String =
 /**
  * 点开某台已配对设备的对话框时自动用热点连接，离开对话框（或退出 app）自动断开：
  * - 平时没有任何热点。你点开对话框、对方也点开你的对话框（两边各自点开，不需要通知对方）
- * - 点开后先扫一次：对方的热点已经在了就去连；没有就自己建热点，谁先点开谁建，对方点开后会扫到并连过来
+ * - 点开后建热点和扫描同时进行：扫到对方的热点已经在了就放弃自己的去连；没有就保留自己的，对方点开后会扫到并连过来
  * - 两边同时点开、各建了一个：设备 ID 小的保留，另一台撤掉自己的去连它
  * - 热点名称和密码由主机自己的证书算出，所有已配对设备都能算出来，不用扫码；不需要选择、不弹窗
  * - 完全由事件触发，没有定时轮询（省电）：点开对话框、Wi-Fi / 定位开关变化、扫描结果、授权完成、设备上线下线、连接断开……才检查。
@@ -227,6 +244,8 @@ object AutoLink {
     @Volatile private var failures = 0
     @Volatile private var scanReqAt = 0L
     @Volatile private var scanDoneAt = 0L
+    /** 扫描是和建热点同时发起的：热点建好后要再核对一次（建好前扫的看不到对方后来才建的热点） */
+    @Volatile private var scanBeforeUp = false
     private var locAsked = false
     private val shown = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -465,6 +484,7 @@ object AutoLink {
         // 本机已建热点：核对一次对方是不是也同时建了，ID 小的保留
         if (DirectGroup.up.value) {
             failures = 0
+            if (scanBeforeUp) { scanBeforeUp = false; scanReqAt = 0L }
             if (t.online) st(LinkKind.OK, "已连接：${t.name}（本机热点）")
             else st(LinkKind.WORK, "热点已建好，等待 ${t.name} 点开你的对话框…")
             if (scanReqAt == 0L) {
@@ -483,28 +503,38 @@ object AutoLink {
             return
         }
         if (DirectGroup.starting) {
-            st(LinkKind.WORK, "正在创建热点…")
+            // 建热点的同时扫描：扫完发现对方的热点已经在了，就放弃自己的，直接去连
+            if (scanReqAt != 0L && scanDoneAt >= scanReqAt && hasSignal(wm, t)) {
+                DirectGroup.stop()
+                scanReqAt = 0L
+                scanBeforeUp = false
+                clientStep(app, t)
+                return
+            }
+            st(LinkKind.WORK, "正在创建热点，同时扫描 ${t.name} 的热点…")
             return
         }
         if (retryJob?.isActive == true) return   // 正在等下一次重试（状态已由 fail 设置）
 
-        // 先扫一次：对方的热点在了就连，没有就自己建（谁先点开谁建）
+        // 建热点和扫描同时进行：扫到对方的热点已经在了就放弃自己的去连；
+        // 都建好了的话由“热点建好后的核对”按设备 ID 决定谁保留
         if (scanReqAt == 0L) {
-            st(LinkKind.WORK, "正在扫描 ${t.name} 的热点…")
+            st(LinkKind.WORK, "正在创建热点，同时扫描 ${t.name} 的热点…")
             requestScan(wm)
+            scanBeforeUp = true
+            hostStep(app)
             return
         }
         if (scanDoneAt < scanReqAt) return
         if (hasSignal(wm, t)) {
             clientStep(app, t)
         } else {
-            scanReqAt = 0L   // 建好后再核对一次
-            hostStep(app)
+            scanReqAt = 0L
+            scanBeforeUp = false
         }
     }
 
     private fun hostStep(app: Context) {
-        st(LinkKind.WORK, "没扫到对方的热点，正在创建本机热点…")
         DirectGroup.start(app, LinkCred.of(Identity.fp)) { msg ->
             if (!LocationSwitch.isOn(app)) askLocation()
             fail(msg)
