@@ -139,6 +139,47 @@ fun AppRoot() {
         }
     }
 
+    // 扫热点二维码：缺权限时先申请；仍然没有就改为手动连接（免权限）
+    val needPerm by HotspotJoin.needPerm.collectAsState()
+    val joinPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        val p = HotspotJoin.needPerm.value
+        HotspotJoin.needPerm.value = null
+        if (p != null) {
+            if (hotspotCoreGranted(ctx)) HotspotJoin.join(ctx, p) else HotspotJoin.manual.value = p
+        }
+    }
+    LaunchedEffect(needPerm) {
+        if (needPerm != null) joinPermLauncher.launch(hotspotPermsMissing(ctx).toTypedArray())
+    }
+    val manual by HotspotJoin.manual.collectAsState()
+    manual?.let { p ->
+        AlertDialog(
+            onDismissRequest = { HotspotJoin.manual.value = null },
+            title = { Text("手动连接对方的热点") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("自动连接用不了（缺少权限或被系统拒绝），可以手动连：", fontSize = 14.sp)
+                    Text("Wi-Fi 名称：" + p.ssid + "\n密码：" + p.pwd, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "在系统的 Wi-Fi 列表里连上它（提示\u201c无法上网\u201d没关系，选保持连接）。连上后回到互传，点\u201c已连接，继续\u201d。",
+                        fontSize = 12.sp, color = Gray
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { HotspotJoin.copyPassword(ctx, p.pwd) }) { Text("复制密码") }
+                        OutlinedButton(onClick = { HotspotJoin.openWifiSettings(ctx) }) { Text("打开 Wi-Fi 设置") }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    HotspotJoin.manual.value = null
+                    HotspotJoin.continueManual(ctx, p)
+                }) { Text("已连接，继续") }
+            },
+            dismissButton = { TextButton(onClick = { HotspotJoin.manual.value = null }) { Text("取消") } }
+        )
+    }
+
     val share by Hub.pendingShare.collectAsState()
     val joinStatus by HotspotJoin.status.collectAsState()
     BackHandler(share != null) { Hub.pendingShare.value = null }
@@ -153,7 +194,7 @@ fun AppRoot() {
         AlertDialog(
             onDismissRequest = {},
             title = { Text("首次使用需要几项授权") },
-            text = { Text("• 通知：让互传在后台保持接收\n• 附近设备 / 定位：发现设备、创建热点\n• 相机：扫描二维码\n\n授权一次，之后不会再逐项弹窗打断你。") },
+            text = { Text("• 通知：让互传在后台保持接收\n• 附近设备 / 定位：创建或连接临时热点（不授权也能用，改为手动开热点）\n• 相机：扫描二维码\n\n授权一次，之后不会再逐项弹窗打断你。") },
             confirmButton = { TextButton(onClick = { permsLauncher.launch(requiredPerms()) }) { Text("继续") } }
         )
     }
