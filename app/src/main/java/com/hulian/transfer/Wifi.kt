@@ -23,11 +23,30 @@ import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.InetAddress
 
-/** 没有 Wi-Fi 时（本机当"主机"）：开一个仅用于互传的本地热点，二维码里放热点账号密码 */
+/** 没有 Wi-Fi 时（本机当"主机"）：开一个仅用于互传的本地热点，二维码里放热点账号密码。热点由本 app 创建、只由本 app 关闭，不影响系统自带的个人热点 */
 object HotspotHost {
     private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
+    private var curSsid = ""
+    private var curPwd = ""
     val payload = MutableStateFlow<String?>(null)
     val error = MutableStateFlow<String?>(null)
+
+    /** 正在等系统创建热点（还没返回结果） */
+    @Volatile var starting = false
+        private set
+
+    /** 本 app 创建的热点已经在运行 */
+    fun isUp(): Boolean = reservation != null && payload.value != null
+
+    private fun build(): String = JSONObject().put("t", "hl").put("ssid", curSsid).put("pwd", curPwd)
+        .put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
+        .put("k", Hub.newPairToken()).put("fp", Identity.fp)
+        .toString()
+
+    /** 热点不重开，只换一个新的一次性配对口令（打开"我的二维码"页时用） */
+    fun refreshPayload() {
+        if (reservation != null) payload.value = build()
+    }
 
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
@@ -35,10 +54,12 @@ object HotspotHost {
         stop()
         error.value = null
         Hub.touch()
+        starting = true
         val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         try {
             wm.startLocalOnlyHotspot(object : WifiManager.LocalOnlyHotspotCallback() {
                 override fun onStarted(r: WifiManager.LocalOnlyHotspotReservation) {
+                    starting = false
                     reservation = r
                     val ssid: String
                     val pwd: String
@@ -52,33 +73,40 @@ object HotspotHost {
                         pwd = (c?.preSharedKey ?: "").removeSurrounding("\"")
                     }
                     Hub.touch()
-                    payload.value = JSONObject().put("t", "hl").put("ssid", ssid).put("pwd", pwd)
-                        .put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
-                        .put("k", Hub.newPairToken()).put("fp", Identity.fp)
-                        .toString()
+                    curSsid = ssid
+                    curPwd = pwd
+                    payload.value = build()
                 }
 
                 override fun onStopped() {
+                    starting = false
                     payload.value = null
                 }
 
                 override fun onFailed(reason: Int) {
+                    starting = false
                     payload.value = null
                     error.value = "热点启动失败（代码 $reason）。请确认已打开系统的\u201c定位\u201d开关，并关闭本机正在使用的个人热点后重试。也可以不用本功能：自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
+                    AutoLink.hostFailed(ctx.applicationContext)
                 }
             }, Handler(Looper.getMainLooper()))
         } catch (e: Exception) {
+            starting = false
             error.value = if (e is SecurityException) {
                 "创建热点缺少权限：请点下方\u201c去设置\u201d授权" + hotspotPermName() + "，并确认系统的定位开关已打开。也可以不授权：自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
             } else {
                 "无法启动热点：" + (e.message ?: "未知错误")
             }
+            AutoLink.hostFailed(ctx.applicationContext)
         }
     }
 
     fun stop() {
         try { reservation?.close() } catch (_: Exception) {}
         reservation = null
+        starting = false
+        curSsid = ""
+        curPwd = ""
         payload.value = null
     }
 }
@@ -115,7 +143,14 @@ object HotspotJoin {
         if (hotspotCoreGranted(ctx)) join(ctx, p) else needPerm.value = p
     }
 
-    fun join(ctx: Context, p: JoinParams) {
+    /** 记住这次连的热点：以后打开 app 直接连它，不用再扫码 */
+    private fun remember(p: JoinParams) {
+        Store.linkRole = "guest"
+        Store.lastJoin = p.toJson()
+    }
+
+    /** auto=true：打开 app 时自动连上次的热点。已配对，所以不再走一次性口令，只验证身份并刷新对方地址；也不跳转聊天 */
+    fun join(ctx: Context, p: JoinParams, auto: Boolean = false) {
         leave()
         Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -127,7 +162,8 @@ object HotspotJoin {
             .setNetworkSpecifier(spec)
             .build()
         active.value = true
-        status.value = "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
+        status.value = if (auto) "正在连接上次的热点…（如有系统弹窗请点\u201c连接\u201d）"
+        else "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
         var finished = false
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -146,16 +182,26 @@ object HotspotJoin {
                 status.value = ""
                 Hub.toast("已连接到对方热点")
                 Hub.scope.launch {
-                    // 用二维码里的一次性口令配对；失败的原因 Hub.pair 会弹提示
-                    if (Hub.pair(p.peerId, p.peerName, gw, p.port, p.token, p.hostFp)) connected.value = p.peerId
+                    if (auto) {
+                        reconnect(p, gw)
+                    } else if (Hub.pair(p.peerId, p.peerName, gw, p.port, p.token, p.hostFp)) {
+                        // 用二维码里的一次性口令配对；失败的原因 Hub.pair 会弹提示
+                        remember(p)
+                        connected.value = p.peerId
+                    }
                 }
             }
 
             override fun onUnavailable() {
-                // 自动连接没成功（用户取消、系统不弹窗或超时）：提供手动连接的办法
                 active.value = false
                 status.value = ""
-                manual.value = p
+                if (auto) {
+                    // 对方每次重新开热点，系统都会生成新的名称/密码，上次存的可能已经失效：提示重新扫一次
+                    Hub.toast("没连上上次的热点（对方的热点密码可能变了）。请让对方点\u201c我的二维码\u201d，你点\u201c扫一扫\u201d")
+                } else {
+                    // 自动连接没成功（用户取消、系统不弹窗或超时）：提供手动连接的办法
+                    manual.value = p
+                }
             }
 
             override fun onLost(network: Network) {
@@ -173,8 +219,28 @@ object HotspotJoin {
             callback = null
             active.value = false
             status.value = ""
-            manual.value = p
+            if (!auto) manual.value = p
         }
+    }
+
+    /** 自动重连后：用已配对的证书验证对方，成功就刷新地址并标为在线（对方可能还在启动，多试几次） */
+    private suspend fun reconnect(p: JoinParams, gw: String) {
+        val known = Hub.peers.value[p.peerId]?.takeIf { it.paired }
+        if (known == null) {
+            Hub.toast("这台设备已被删除，请重新扫码配对")
+            return
+        }
+        val target = known.copy(host = gw, port = p.port)
+        for (i in 0 until 10) {
+            if (Net.ping(target)) {
+                Hub.upsertPeer(known.id, known.name, gw, p.port)
+                Hub.markOnline(known.id)
+                Hub.onNetworkChanged()
+                return
+            }
+            delay(2000)
+        }
+        Hub.toast("已连上热点，但对方还没有打开互传")
     }
 
     // ---------- 免权限的手动方式 ----------
@@ -223,7 +289,10 @@ object HotspotJoin {
         leave()
         bindTo(m, found.first)
         Hub.scope.launch {
-            if (Hub.pair(p.peerId, p.peerName, found.second, p.port, p.token, p.hostFp)) connected.value = p.peerId
+            if (Hub.pair(p.peerId, p.peerName, found.second, p.port, p.token, p.hostFp)) {
+                remember(p)
+                connected.value = p.peerId
+            }
         }
     }
 
