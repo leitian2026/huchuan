@@ -30,7 +30,7 @@ class MainActivity : ComponentActivity() {
             askedNotif = true
             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        // 打开 app：按上次的角色自动开热点 / 连上次的热点（没有角色记录就什么都不做）
+        // 打开 app：自动建 / 连固定的 Wi-Fi Direct 热点（没有已配对设备就什么都不做）
         AutoLink.start(this)
     }
 
@@ -52,7 +52,6 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
-        AutoLink.init()
         setContent { HulianTheme { AppRoot() } }
         // 前台服务不依赖通知权限，直接启动；权限在首次使用时由界面统一说明并申请
         ContextCompat.startForegroundService(this, Intent(this, TransferService::class.java))
