@@ -143,14 +143,8 @@ object HotspotJoin {
         if (hotspotCoreGranted(ctx)) join(ctx, p) else needPerm.value = p
     }
 
-    /** 记住这次连的热点：以后打开 app 直接连它，不用再扫码 */
-    private fun remember(p: JoinParams) {
-        Store.linkRole = "guest"
-        Store.lastJoin = p.toJson()
-    }
-
-    /** auto=true：打开 app 时自动连上次的热点。已配对，所以不再走一次性口令，只验证身份并刷新对方地址；也不跳转聊天 */
-    fun join(ctx: Context, p: JoinParams, auto: Boolean = false) {
+    /** auto=true：打开 app 时自动连对方的固定热点。已配对，所以不再走一次性口令，只验证身份并刷新对方地址；也不跳转聊天。done 用来告诉调用方这次成没成 */
+    fun join(ctx: Context, p: JoinParams, auto: Boolean = false, done: kotlinx.coroutines.CompletableDeferred<Boolean>? = null) {
         leave()
         Hub.touch()
         val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -162,7 +156,7 @@ object HotspotJoin {
             .setNetworkSpecifier(spec)
             .build()
         active.value = true
-        status.value = if (auto) "正在连接上次的热点…（如有系统弹窗请点\u201c连接\u201d）"
+        status.value = if (auto) "正在连接对方…（如有系统弹窗请点\u201c连接\u201d）"
         else "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
         var finished = false
         val cb = object : ConnectivityManager.NetworkCallback() {
@@ -183,10 +177,9 @@ object HotspotJoin {
                 Hub.toast("已连接到对方热点")
                 Hub.scope.launch {
                     if (auto) {
-                        reconnect(p, gw)
+                        done?.complete(reconnect(p, gw))
                     } else if (Hub.pair(p.peerId, p.peerName, gw, p.port, p.token, p.hostFp)) {
                         // 用二维码里的一次性口令配对；失败的原因 Hub.pair 会弹提示
-                        remember(p)
                         connected.value = p.peerId
                     }
                 }
@@ -196,8 +189,7 @@ object HotspotJoin {
                 active.value = false
                 status.value = ""
                 if (auto) {
-                    // 对方每次重新开热点，系统都会生成新的名称/密码，上次存的可能已经失效：提示重新扫一次
-                    Hub.toast("没连上上次的热点（对方的热点密码可能变了）。请让对方点\u201c我的二维码\u201d，你点\u201c扫一扫\u201d")
+                    done?.complete(false)
                 } else {
                     // 自动连接没成功（用户取消、系统不弹窗或超时）：提供手动连接的办法
                     manual.value = p
@@ -206,6 +198,7 @@ object HotspotJoin {
 
             override fun onLost(network: Network) {
                 active.value = false
+                done?.complete(false)
                 status.value = "热点连接已断开"
                 try { m.bindProcessToNetwork(null) } catch (_: Exception) {}
                 clearStatusLater()
@@ -219,16 +212,16 @@ object HotspotJoin {
             callback = null
             active.value = false
             status.value = ""
-            if (!auto) manual.value = p
+            if (auto) done?.complete(false) else manual.value = p
         }
     }
 
     /** 自动重连后：用已配对的证书验证对方，成功就刷新地址并标为在线（对方可能还在启动，多试几次） */
-    private suspend fun reconnect(p: JoinParams, gw: String) {
+    private suspend fun reconnect(p: JoinParams, gw: String): Boolean {
         val known = Hub.peers.value[p.peerId]?.takeIf { it.paired }
         if (known == null) {
             Hub.toast("这台设备已被删除，请重新扫码配对")
-            return
+            return false
         }
         val target = known.copy(host = gw, port = p.port)
         for (i in 0 until 10) {
@@ -236,11 +229,12 @@ object HotspotJoin {
                 Hub.upsertPeer(known.id, known.name, gw, p.port)
                 Hub.markOnline(known.id)
                 Hub.onNetworkChanged()
-                return
+                return true
             }
             delay(2000)
         }
         Hub.toast("已连上热点，但对方还没有打开互传")
+        return false
     }
 
     // ---------- 免权限的手动方式 ----------
@@ -289,10 +283,7 @@ object HotspotJoin {
         leave()
         bindTo(m, found.first)
         Hub.scope.launch {
-            if (Hub.pair(p.peerId, p.peerName, found.second, p.port, p.token, p.hostFp)) {
-                remember(p)
-                connected.value = p.peerId
-            }
+            if (Hub.pair(p.peerId, p.peerName, found.second, p.port, p.token, p.hostFp)) connected.value = p.peerId
         }
     }
 
