@@ -120,7 +120,13 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     LaunchedEffect(Unit) {
         val ip = Net.wifiIp()
-        if (ip != null) {
+        if (HotspotHost.isUp()) {
+            // 本 app 的热点已经开着（自动打开的）：不重开，只换新的一次性口令。
+            // 注意要放在 Wi-Fi 判断前面：热点开着时热点网卡也会被当成"局域网"
+            HotspotHost.refreshPayload()
+        } else if (HotspotHost.starting) {
+            // 热点正在创建，等它出结果即可
+        } else if (ip != null) {
             // 已连 Wi-Fi：直接显示局域网二维码
             lan = lanPayload(ip)
         } else {
@@ -140,7 +146,7 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
     DisposableEffect(Unit) {
-        onDispose { if (Hub.helloCount == startHello) HotspotHost.stop() }
+        onDispose { if (Hub.helloCount == startHello && !AutoLink.running) HotspotHost.stop() }
     }
 
     val payload = lan ?: hsPayload
