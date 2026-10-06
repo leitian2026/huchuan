@@ -212,7 +212,7 @@ object HotspotJoin {
         }
         callback = cb
         try {
-            m.requestNetwork(req, cb, 30000)
+            m.requestNetwork(req, cb, 15000)   // 15 秒内没连上就放弃（含系统弹窗等用户点“连接”的时间）
         } catch (e: Exception) {
             // 比如系统拒绝了权限：不再被当成"二维码无效"，直接改为手动连接
             callback = null
@@ -222,7 +222,7 @@ object HotspotJoin {
         }
     }
 
-    /** 自动重连后：用已配对的证书验证对方，成功就刷新地址并标为在线（对方可能还在启动，多试几次） */
+    /** 自动重连后：用已配对的证书验证对方，成功就刷新地址并标为在线（对方可能还在启动，每 2 秒核对一次，共 6 次） */
     private suspend fun reconnect(p: JoinParams, gw: String): Boolean {
         val known = Hub.peers.value[p.peerId]?.takeIf { it.paired }
         if (known == null) {
@@ -230,7 +230,7 @@ object HotspotJoin {
             return false
         }
         val target = known.copy(host = gw, port = p.port)
-        for (i in 0 until 10) {
+        for (i in 0 until 6) {
             if (Net.ping(target)) {
                 Hub.upsertPeer(known.id, known.name, gw, p.port)
                 Hub.markOnline(known.id)
