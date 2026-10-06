@@ -157,8 +157,8 @@ object HotspotJoin {
             .setNetworkSpecifier(spec)
             .build()
         active.value = true
-        status.value = if (auto) "正在连接对方…（如有系统弹窗请点\u201c连接\u201d）"
-        else "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
+        // 自动连接的进度由对话框顶部的状态条显示，这里只在手动扫码连接时显示
+        status.value = if (auto) "" else "正在连接对方热点…（请在系统弹窗中点\u201c连接\u201d）"
         var finished = false
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -200,7 +200,7 @@ object HotspotJoin {
             override fun onLost(network: Network) {
                 active.value = false
                 done?.complete(false)
-                status.value = "热点连接已断开"
+                if (!auto) status.value = "热点连接已断开"
                 try { m.bindProcessToNetwork(null) } catch (_: Exception) {}
                 clearStatusLater()
             }
