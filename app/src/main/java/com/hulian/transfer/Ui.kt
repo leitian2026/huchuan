@@ -284,7 +284,7 @@ fun AppRoot() {
 // ---------------- 通用组件 ----------------
 
 @Composable
-fun TopBar(title: String, onBack: (() -> Unit)?, actions: @Composable RowScope.() -> Unit = {}) {
+fun TopBar(title: String, onBack: (() -> Unit)?, onTitleClick: (() -> Unit)? = null,  actions: @Composable RowScope.() -> Unit = {}) {
     // 渐变背景先画，再加状态栏内边距：渐变会一直铺到屏幕最顶端，和状态栏融为一体
     Box(
         Modifier.fillMaxWidth()
@@ -302,7 +302,10 @@ fun TopBar(title: String, onBack: (() -> Unit)?, actions: @Composable RowScope.(
             } else {
                 Spacer(Modifier.width(12.dp))
             }
-            Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(
+                title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).let { if (onTitleClick != null) it.clickable(onClick = onTitleClick) else it }
+            )
             actions()
         }
     }
@@ -415,8 +418,13 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     val linkActive = joinActive || hsPayload != null || groupUp
     var more by remember { mutableStateOf(false) }
 
+    // 顶栏标题直接显示自动连接状态（扫描 / 创建热点 / 连接中 / 已连接 / 失败原因）；没有状态时才显示设备名
+    val link by AutoLink.status.collectAsState()
+    val fullTitle = link?.text ?: title
+    val titleClick: (() -> Unit)? = link?.takeIf { it.action.isNotEmpty() }?.let { { AutoLink.onStatusClick(ctx) } }
+
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopBar(title, onBack) {
+        TopBar(fullTitle, onBack, titleClick) {
             Box {
                 IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
                 DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
@@ -431,27 +439,6 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                     DropdownMenuItem(text = { Text("清空聊天记录") }, onClick = { more = false; Hub.clearHistory(peerId) })
                     DropdownMenuItem(text = { Text("删除此设备") }, onClick = { more = false; Hub.forgetPeer(peerId); onBack() })
                 }
-            }
-        }
-        // 自动连接状态条：扫描 / 创建热点 / 连接中 / 等对方 / 已连接 / 失败原因，一直显示，不会看不出是卡住还是在等
-        val link by AutoLink.status.collectAsState()
-        link?.let { st ->
-            val (bg, fg) = when (st.kind) {
-                LinkKind.OK -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
-                LinkKind.WARN -> Color(0xFFFFF3E0) to Color(0xFFE65100)
-                LinkKind.WORK -> Color(0xFFE3F2FD) to Color(0xFF1565C0)
-            }
-            Row(
-                Modifier.fillMaxWidth().background(bg)
-                    .clickable(enabled = st.action.isNotEmpty()) { AutoLink.onStatusClick(ctx) }
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (st.kind == LinkKind.WORK) {
-                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = fg)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(st.text, color = fg, fontSize = 13.sp)
             }
         }
         if (list.isEmpty()) {
