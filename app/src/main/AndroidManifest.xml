@@ -14,6 +14,8 @@
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
+    <!-- 只有电脑上执行一次 adb shell pm grant com.hulian.transfer android.permission.WRITE_SECURE_SETTINGS 后才生效；用来自动开/关定位 -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -57,6 +59,8 @@
             android:name=".TransferService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <service android:name=".ExitWatcher" android:exported="false" />
 
         <receiver
             android:name=".InstallReceiver"
