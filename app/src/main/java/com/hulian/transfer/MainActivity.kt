@@ -30,12 +30,13 @@ class MainActivity : ComponentActivity() {
             askedNotif = true
             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        // 打开 app：自动建 / 连固定的 Wi-Fi Direct 热点（没有已配对设备就什么都不做）
-        AutoLink.start(this)
+        // 回到前台：如果对话框还开着，重新监听并检查一次（平时不自动开热点）
+        AutoLink.onForeground(this)
     }
 
     override fun onStop() {
         Hub.appVisible = false
+        AutoLink.onBackground()
         super.onStop()
     }
 
