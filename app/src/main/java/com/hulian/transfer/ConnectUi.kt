@@ -55,6 +55,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -105,9 +106,12 @@ fun MyQrScreen(onBack: () -> Unit) {
     var lan by remember { mutableStateOf<String?>(null) }
     val startHello = remember { Hub.helloCount }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
-        if (hotspotPermsMissing(ctx).isEmpty()) HotspotHost.start(ctx)
-        else HotspotHost.error.value = "创建热点需要\u201c附近设备\u201d和\u201c位置信息\u201d权限。请点下方\u201c去设置\u201d，在权限里都设为允许后返回重试"
+        if (hotspotCoreGranted(ctx)) HotspotHost.start(ctx)
+        else HotspotHost.error.value = "没有授予创建热点所需的权限：" + hotspotPermName() +
+            "。请点下方\u201c去设置\u201d授权；也可以不授权，自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
     }
+    fun lanPayload(ip: String): String = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
+        .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).toString()
     // 没有 Wi-Fi 时：先补齐权限，再创建临时热点
     fun startHotspot() {
         HotspotHost.error.value = null
@@ -118,10 +122,20 @@ fun MyQrScreen(onBack: () -> Unit) {
         val ip = Net.wifiIp()
         if (ip != null) {
             // 已连 Wi-Fi：直接显示局域网二维码
-            lan = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-                .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).toString()
+            lan = lanPayload(ip)
         } else {
             startHotspot()
+        }
+    }
+    // 热点创建失败 / 没有权限时：每 1.5 秒看一下用户是不是已经手动打开了系统热点（或连上了 Wi-Fi），有了就自动显示二维码
+    LaunchedEffect(lan, hsPayload, hsErr) {
+        while (lan == null && hsPayload == null && hsErr != null) {
+            delay(1500)
+            val ip = Net.wifiIp()
+            if (ip != null) {
+                lan = lanPayload(ip)
+                HotspotHost.error.value = null
+            }
         }
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
@@ -161,6 +175,13 @@ fun MyQrScreen(onBack: () -> Unit) {
                             .setData(Uri.parse("package:" + ctx.packageName))
                     )
                 }) { Text("去设置") }
+                OutlinedButton(onClick = {
+                    try { ctx.startActivity(Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)) } catch (_: Exception) {}
+                }) { Text("手动打开系统热点") }
+                Text(
+                    "不想授权也可以：在系统里打开\u201c个人热点\u201d，让对方连上它。本页检测到后会自动显示二维码，对方扫码即可（不需要任何额外权限）",
+                    color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center
+                )
             }
         }
     }
