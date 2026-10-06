@@ -436,7 +436,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                     CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = fg)
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(st.text, color = fg, fontSize = 13.sp)
+                Text(st.text, color = fg, fontSize = 14.sp)
             }
         }
     }
