@@ -142,6 +142,7 @@ fun AppRoot() {
     // 扫热点二维码：缺权限时先申请；仍然没有就改为手动连接（免权限）
     val needPerm by HotspotJoin.needPerm.collectAsState()
     val joinPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        AutoLink.kick()
         val p = HotspotJoin.needPerm.value
         HotspotJoin.needPerm.value = null
         if (p != null) {
@@ -212,6 +213,7 @@ fun AppRoot() {
     val permsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         Store.permsAsked = true
         showIntro = false
+        AutoLink.kick()
     }
     if (showIntro) {
         AlertDialog(
@@ -367,6 +369,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     val all by Hub.msgs.collectAsState()
     val joinActive by HotspotJoin.active.collectAsState()
     val hsPayload by HotspotHost.payload.collectAsState()
+    val groupUp by DirectGroup.up.collectAsState()
     val peer = peers[peerId]
     val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
     val ls = rememberLazyListState()
@@ -404,7 +407,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         peer.online -> peer.name
         else -> peer.name + "（离线）"
     }
-    val linkActive = joinActive || hsPayload != null
+    val linkActive = joinActive || hsPayload != null || groupUp
     var more by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -415,6 +418,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                     if (linkActive) {
                         DropdownMenuItem(text = { Text("断开热点连接") }, onClick = {
                             more = false
+                            AutoLink.pause()
                             HotspotJoin.leave()
                             HotspotHost.stop()
                         })
