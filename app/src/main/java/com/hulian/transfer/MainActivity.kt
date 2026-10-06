@@ -30,11 +30,19 @@ class MainActivity : ComponentActivity() {
             askedNotif = true
             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // 打开 app：按上次的角色自动开热点 / 连上次的热点（没有角色记录就什么都不做）
+        AutoLink.start(this)
     }
 
     override fun onStop() {
         Hub.appVisible = false
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        // 真正退出（返回键退出 / 被关闭）才关；旋转屏幕等重建不算
+        if (isFinishing) AutoLink.exit()
+        super.onDestroy()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +52,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        AutoLink.init()
         setContent { HulianTheme { AppRoot() } }
         // 前台服务不依赖通知权限，直接启动；权限在首次使用时由界面统一说明并申请
         ContextCompat.startForegroundService(this, Intent(this, TransferService::class.java))
