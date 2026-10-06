@@ -464,6 +464,7 @@ object AutoLink {
                 delay(1000)
                 waited++
             }
+            Hub.byeJob?.join()   // 先让“我退出了”的通知发出去，再断热点
             if (target == null) closeLink()
         }
     }
