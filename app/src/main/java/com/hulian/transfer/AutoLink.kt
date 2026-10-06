@@ -319,7 +319,13 @@ object AutoLink {
         kicks.trySend(Unit)
     }
 
-    private val RETRY_MS = longArrayOf(3_000, 5_000, 8_000, 12_000, 20_000, 30_000)
+    /** 失败后重试：每 2 秒一次，共 4 次 */
+    private const val RETRY_MS = 2_000L
+    private const val RETRY_MAX = 4
+
+    /** 热点已建好、等对方时的核对：每 2 秒一次，共 6 次 */
+    private const val RECHECK_MS = 2_000L
+    private const val RECHECK_TIMES = 6
 
     private fun later(ms: Long) {
         retryJob?.cancel()
@@ -330,16 +336,16 @@ object AutoLink {
         }
     }
 
-    /** 失败后重试：3、5、8、12、20 秒，之后每 30 秒一次，最多 15 次，之后等下一次事件 */
+    /** 失败后重试：每 2 秒一次，最多 4 次，之后等下一次事件 */
     private fun fail(reason: String) {
         failures++
         scanReqAt = 0L
-        if (failures > 15) {
+        if (failures > RETRY_MAX) {
             st(LinkKind.WARN, "$reason。已停止自动重试（点这里重试）", "retry")
             return
         }
-        st(LinkKind.WARN, "$reason，稍后自动重试（第 $failures/15 次，点这里立即重试）", "retry")
-        later(RETRY_MS[minOf(failures - 1, RETRY_MS.size - 1)])
+        st(LinkKind.WARN, "$reason，稍后自动重试（第 $failures/$RETRY_MAX 次，点这里立即重试）", "retry")
+        later(RETRY_MS)
     }
 
     /** 新开界面时恢复（用户手动“断开”之后，重新点开对话框才会再连） */
@@ -613,15 +619,15 @@ object AutoLink {
     }
 
     /**
-     * 本机热点已建好、对方还没连上时，每 3 秒核对一次、共 3 次，之后每 30 秒一次（都是一次性延时，不是持续轮询）：
+     * 本机热点已建好、对方还没连上时，每 2 秒核对一次、共 6 次（约 12 秒），之后每 30 秒一次（都是一次性延时，不是持续轮询）：
      * 对方可能晚一步才建了热点（两边都在等，谁也不动），或者对方断开又重新打开了
      */
     private fun armRecheck() {
         if (recheckJob?.isActive == true) return
         recheckJob = Hub.scope.launch {
-            // 前三次每 3 秒核对一次，之后才放到 30 秒：对方的热点往往就是比我们晚几秒建好，
+            // 前 6 次每 2 秒核对一次，之后才放到 30 秒：对方的热点往往就是比我们晚几秒建好，
             // 一次性延时，不是轮询；系统对前台扫描有次数限制（约 2 分钟 4 次），所以后面放长
-            delay(if (recheckN++ < 3) 3_000L else 30_000L)
+            delay(if (recheckN++ < RECHECK_TIMES) RECHECK_MS else 30_000L)
             recheckJob = null
             if (DirectGroup.up.value && target != null) {
                 scanReqAt = 0L
