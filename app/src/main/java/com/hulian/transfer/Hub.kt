@@ -138,13 +138,13 @@ object Hub {
         if (changed) persistSoon()
     }
 
-    /** 配对成功：记住对方，以及它的证书指纹 */
-    fun addPaired(id: String, name: String, host: String, port: Int, fp: String) {
+    /** 配对成功：记住对方，以及它的证书指纹；iHost=本机是开二维码的一方（以后没有 Wi-Fi 时由它建热点） */
+    fun addPaired(id: String, name: String, host: String, port: Int, fp: String, iHost: Boolean) {
         if (id == Store.deviceId) return
         _peers.update { map ->
             val old = map[id]
             val n = name.ifEmpty { old?.name ?: "未知设备" }
-            map + (id to Peer(id, n, host, port, true, now(), fp))
+            map + (id to Peer(id, n, host, port, true, now(), fp, iHost))
         }
         persistSoon()
     }
@@ -185,7 +185,7 @@ object Hub {
                     pairPrompt.value = PairPrompt(id, name.ifEmpty { "对方设备" }, code, false, null)
                 }
             }
-            addPaired(id, r.name.ifEmpty { name }, host, port, r.fp)
+            addPaired(id, r.name.ifEmpty { name }, host, port, r.fp, iHost = false)  // 扫码的一方：以后连对方的热点
             true
         } catch (e: Exception) {
             toast("配对失败：" + friendlyError(e))
