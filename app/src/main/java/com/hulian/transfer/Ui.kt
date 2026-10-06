@@ -180,6 +180,29 @@ fun AppRoot() {
         )
     }
 
+    // 自动开热点需要系统定位，而本 app 没有权限自己开：引导去设置里打开，返回后会自动继续
+    val needLoc by AutoLink.needLocation.collectAsState()
+    if (needLoc) {
+        AlertDialog(
+            onDismissRequest = { AutoLink.needLocation.value = false },
+            title = { Text("需要打开定位") },
+            text = {
+                Text(
+                    "创建热点需要系统的\u201c定位\u201d开关。点\u201c去打开\u201d，打开后回到互传，会自动继续。\n\n" +
+                        "想让互传以后自动开关定位：在电脑上执行一次\nadb shell pm grant com.hulian.transfer android.permission.WRITE_SECURE_SETTINGS",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    AutoLink.needLocation.value = false
+                    LocationSwitch.openSettings(ctx)
+                }) { Text("去打开") }
+            },
+            dismissButton = { TextButton(onClick = { AutoLink.needLocation.value = false }) { Text("取消") } }
+        )
+    }
+
     val share by Hub.pendingShare.collectAsState()
     val joinStatus by HotspotJoin.status.collectAsState()
     BackHandler(share != null) { Hub.pendingShare.value = null }
