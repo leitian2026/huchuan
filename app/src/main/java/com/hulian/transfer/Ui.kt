@@ -211,8 +211,8 @@ fun AppRoot() {
             onDismissRequest = { AutoLink.needChoice.value = false },
             title = { Text("怎么连接？") },
             text = { Text("两台手机一台选\u201c建热点\u201d，另一台选\u201c接收信号\u201d。\n\n同一个 Wi-Fi 下会自动连接，不用选。", fontSize = 14.sp) },
-            confirmButton = { TextButton(onClick = { AutoLink.choose(LinkRole.HOST) }) { Text("建热点") } },
-            dismissButton = { TextButton(onClick = { AutoLink.choose(LinkRole.RECV) }) { Text("接收信号") } }
+            confirmButton = { TextButton(onClick = { AutoLink.choose(LinkRole.HOST) }) { Text("建热点", fontSize = 18.sp, fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton(onClick = { AutoLink.choose(LinkRole.RECV) }) { Text("接收信号", fontSize = 18.sp, fontWeight = FontWeight.Bold) } }
         )
     }
 
