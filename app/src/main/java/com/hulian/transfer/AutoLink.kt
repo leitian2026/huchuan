@@ -276,6 +276,7 @@ object AutoLink {
     private var retryJob: Job? = null
     private var scanTimer: Job? = null
     private var recheckJob: Job? = null
+    @Volatile private var recheckN = 0
     private var watchers: List<Job> = emptyList()
     private var appCtx: Context? = null
     private var clientJob: Job? = null
@@ -579,6 +580,7 @@ object AutoLink {
                 st(LinkKind.OK, "已连接：${t.name}（本机热点）")
                 recheckJob?.cancel()
                 recheckJob = null
+                recheckN = 0
             } else {
                 st(LinkKind.WORK, "热点已建好，等待 ${t.name} 选择\u201c接收信号\u201d…")
                 armRecheck()
@@ -611,13 +613,15 @@ object AutoLink {
     }
 
     /**
-     * 本机热点已建好、对方还没连上时，每 30 秒重新扫一次、核对一次：
+     * 本机热点已建好、对方还没连上时，5 秒、8 秒后各核对一次，之后每 30 秒一次（都是一次性延时，不是持续轮询）：
      * 对方可能晚一步才建了热点（两边都在等，谁也不动），或者对方断开又重新打开了
      */
     private fun armRecheck() {
         if (recheckJob?.isActive == true) return
         recheckJob = Hub.scope.launch {
-            delay(30_000)
+            // 前两次提前核对（5 秒、再 8 秒），之后才放到 30 秒：对方的热点往往就是比我们晚几秒建好，
+            // 一次性延时，不是轮询；系统对前台扫描有次数限制（约 2 分钟 4 次），所以后面放长
+            delay(when (recheckN++) { 0 -> 5_000L; 1 -> 8_000L; else -> 30_000L })
             recheckJob = null
             if (DirectGroup.up.value && target != null) {
                 scanReqAt = 0L
@@ -669,6 +673,7 @@ object AutoLink {
         scanTimer?.cancel()
         recheckJob?.cancel()
         recheckJob = null
+        recheckN = 0
         choiceJob?.cancel()
         recvJob?.cancel()
         role = null
