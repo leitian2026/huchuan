@@ -371,6 +371,11 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     val hsPayload by HotspotHost.payload.collectAsState()
     val groupUp by DirectGroup.up.collectAsState()
     val peer = peers[peerId]
+    // 点开对话框：自动用热点连接这台设备；离开对话框：传输结束后自动断开
+    DisposableEffect(peerId) {
+        AutoLink.open(ctx, peerId)
+        onDispose { AutoLink.close() }
+    }
     val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
     val ls = rememberLazyListState()
     LaunchedEffect(list.size) { if (list.isNotEmpty()) ls.scrollToItem(list.size - 1) }
