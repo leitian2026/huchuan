@@ -613,15 +613,15 @@ object AutoLink {
     }
 
     /**
-     * 本机热点已建好、对方还没连上时，5 秒、8 秒后各核对一次，之后每 30 秒一次（都是一次性延时，不是持续轮询）：
+     * 本机热点已建好、对方还没连上时，每 3 秒核对一次、共 3 次，之后每 30 秒一次（都是一次性延时，不是持续轮询）：
      * 对方可能晚一步才建了热点（两边都在等，谁也不动），或者对方断开又重新打开了
      */
     private fun armRecheck() {
         if (recheckJob?.isActive == true) return
         recheckJob = Hub.scope.launch {
-            // 前两次提前核对（5 秒、再 8 秒），之后才放到 30 秒：对方的热点往往就是比我们晚几秒建好，
+            // 前三次每 3 秒核对一次，之后才放到 30 秒：对方的热点往往就是比我们晚几秒建好，
             // 一次性延时，不是轮询；系统对前台扫描有次数限制（约 2 分钟 4 次），所以后面放长
-            delay(when (recheckN++) { 0 -> 5_000L; 1 -> 8_000L; else -> 30_000L })
+            delay(if (recheckN++ < 3) 3_000L else 30_000L)
             recheckJob = null
             if (DirectGroup.up.value && target != null) {
                 scanReqAt = 0L
