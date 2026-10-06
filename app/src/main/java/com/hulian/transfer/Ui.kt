@@ -433,6 +433,27 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 }
             }
         }
+        // 自动连接状态条：扫描 / 创建热点 / 连接中 / 等对方 / 已连接 / 失败原因，一直显示，不会看不出是卡住还是在等
+        val link by AutoLink.status.collectAsState()
+        link?.let { st ->
+            val (bg, fg) = when (st.kind) {
+                LinkKind.OK -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
+                LinkKind.WARN -> Color(0xFFFFF3E0) to Color(0xFFE65100)
+                LinkKind.WORK -> Color(0xFFE3F2FD) to Color(0xFF1565C0)
+            }
+            Row(
+                Modifier.fillMaxWidth().background(bg)
+                    .clickable(enabled = st.action.isNotEmpty()) { AutoLink.onStatusClick(ctx) }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (st.kind == LinkKind.WORK) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = fg)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(st.text, color = fg, fontSize = 13.sp)
+            }
+        }
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("还没有传输记录", color = Gray, fontSize = 14.sp)
