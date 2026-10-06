@@ -13,6 +13,7 @@ import android.annotation.SuppressLint
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
@@ -88,8 +89,8 @@ object DirectGroup {
 
     private fun reasonText(r: Int) = when (r) {
         WifiP2pManager.P2P_UNSUPPORTED -> "本机不支持 Wi-Fi Direct"
-        WifiP2pManager.BUSY -> "Wi-Fi Direct 正忙（可能本机正连着 Wi-Fi 且芯片不能同时用，或有别的 Wi-Fi Direct 连接），稍后自动重试"
-        else -> "创建热点失败（代码 $r），稍后自动重试"
+        WifiP2pManager.BUSY -> "Wi-Fi Direct 正忙（可能本机正连着 Wi-Fi 且芯片不能同时用，或有别的 Wi-Fi Direct 连接）"
+        else -> "创建热点失败（代码 $r）"
     }
 
     @SuppressLint("MissingPermission")
@@ -101,6 +102,13 @@ object DirectGroup {
         mgr = m
         ch = c
         starting = true
+        // 系统偶尔一直不回调：15 秒还没出结果就当失败，别让界面一直卡在“正在创建”
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (starting) {
+                starting = false
+                onFail("创建热点超时")
+            }
+        }, 15_000)
         try {
             m.requestGroupInfo(c) { g ->
                 if (g != null && g.networkName == cred.ssid) {
@@ -166,6 +174,11 @@ object DirectGroup {
     }
 }
 
+enum class LinkKind { WORK, OK, WARN }
+
+/** 对话框顶部显示的连接状态。action：""=无，"retry"=点一下重试，"location"=点一下去系统设置打开定位 */
+data class LinkStatus(val kind: LinkKind, val text: String, val action: String = "")
+
 /**
  * 点开某台已配对设备的对话框时自动用热点连接，离开对话框（或退出 app）自动断开：
  * - 平时没有任何热点。你点开对话框、对方也点开你的对话框（两边各自点开，不需要通知对方）
@@ -179,6 +192,24 @@ object DirectGroup {
 object AutoLink {
     /** 需要用户去系统里手动打开定位（本 app 没有权限自己开） */
     val needLocation = MutableStateFlow(false)
+
+    /** 当前连接状态（对话框顶部显示）；null 表示不显示 */
+    val status = MutableStateFlow<LinkStatus?>(null)
+
+    private fun st(kind: LinkKind, text: String, action: String = "") {
+        status.value = LinkStatus(kind, text, action)
+    }
+
+    /** 点状态条：重试 / 去设置里打开定位 */
+    fun onStatusClick(ctx: Context) {
+        when (status.value?.action) {
+            "retry" -> {
+                st(LinkKind.WORK, "正在重试…")
+                kick()
+            }
+            "location" -> LocationSwitch.openSettings(ctx)
+        }
+    }
 
     /** 当前打开着对话框的设备 ID；null 表示没有（此时不自动连接） */
     @Volatile private var target: String? = null
@@ -239,10 +270,14 @@ object AutoLink {
     }
 
     /** 失败后重试：10 秒、20 秒、40 秒……最长 5 分钟，最多 8 次，之后等下一次事件 */
-    private fun fail() {
+    private fun fail(reason: String) {
         failures++
         scanReqAt = 0L
-        if (failures > 8) return
+        if (failures > 8) {
+            st(LinkKind.WARN, "$reason。已停止自动重试（点这里重试）", "retry")
+            return
+        }
+        st(LinkKind.WARN, "$reason，稍后自动重试（第 $failures/8 次，点这里立即重试）", "retry")
         later(minOf(10_000L shl (failures - 1), 300_000L))
     }
 
@@ -252,6 +287,7 @@ object AutoLink {
     /** 用户在聊天菜单里手动断开：这次对话框里不再自动重连 */
     fun pause() {
         paused = true
+        st(LinkKind.WARN, "已手动断开。重新点开对话框才会再连")
         retryJob?.cancel()
         retryJob = null
         scanTimer?.cancel()
@@ -310,6 +346,7 @@ object AutoLink {
             joinedId = null
         }
         target = peerId
+        st(LinkKind.WORK, "正在准备连接…")
         registerReceiver(app)
         if (keeper?.isActive != true) {
             try { app.startService(Intent(app, ExitWatcher::class.java)) } catch (_: Exception) {}
@@ -393,37 +430,50 @@ object AutoLink {
     }
 
     private fun step(app: Context) {
-        val id = target ?: return
-        val t = Hub.peers.value[id]?.takeIf { it.paired } ?: return
+        val id = target ?: run { status.value = null; return }
+        val t = Hub.peers.value[id]?.takeIf { it.paired } ?: run { status.value = null; return }
         // 用二维码手动连接 / 手动开的热点正在使用：不打扰
-        if (HotspotHost.isUp() || HotspotHost.starting || (HotspotJoin.active.value && !HotspotJoin.autoMode)) return
-        if (!hotspotCoreGranted(app)) {
-            note("perm", "自动连接需要授予" + hotspotPermName() + "权限，授权后会自动继续")
+        if (HotspotHost.isUp() || HotspotHost.starting || (HotspotJoin.active.value && !HotspotJoin.autoMode)) {
+            status.value = null
             return
         }
-        clear("perm")
+        if (!hotspotCoreGranted(app)) {
+            st(LinkKind.WARN, "需要授予" + hotspotPermName() + "权限，授权后自动继续")
+            return
+        }
         val wm = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
         if (!wm.isWifiEnabled) {
-            note("wifi", "请打开 Wi-Fi 开关（不需要连接任何网络），打开后会自动连接")
+            st(LinkKind.WARN, "请打开 Wi-Fi 开关（不需要连接任何网络），打开后自动连接")
             return
         }
-        clear("wifi")
-        if (HotspotJoin.active.value) return   // 已经连上对方的热点，没有后续动作
+        // 已经连上对方的热点
+        if (HotspotJoin.active.value) {
+            if (t.online) st(LinkKind.OK, "已连接：${t.name}")
+            else st(LinkKind.WORK, "已连上对方的热点，正在联系 ${t.name}…")
+            return
+        }
         // 对方已经通过同一个 Wi-Fi 在线（原来的局域网方式能用）：不用再建热点
-        if (t.online && !DirectGroup.up.value) return
-        if (!ensureLocation(app)) return
-        clear("loc")
+        if (t.online && !DirectGroup.up.value) {
+            st(LinkKind.OK, "已连接：${t.name}（同一 Wi-Fi）")
+            return
+        }
+        if (!ensureLocation(app)) {
+            st(LinkKind.WARN, "需要打开系统的定位开关才能继续（点这里去设置）", "location")
+            return
+        }
 
         // 本机已建热点：核对一次对方是不是也同时建了，ID 小的保留
         if (DirectGroup.up.value) {
-            clear("fail")
             failures = 0
+            if (t.online) st(LinkKind.OK, "已连接：${t.name}（本机热点）")
+            else st(LinkKind.WORK, "热点已建好，等待 ${t.name} 点开你的对话框…")
             if (scanReqAt == 0L) {
                 requestScan(wm)
                 return
             }
             if (scanDoneAt < scanReqAt) return
             if (t.id < Store.deviceId && hasSignal(wm, t)) {
+                st(LinkKind.WORK, "${t.name} 也建了热点，改为连接对方的热点…")
                 DirectGroup.stop()
                 scanReqAt = 0L
                 kick(reset = false)
@@ -432,11 +482,15 @@ object AutoLink {
             }
             return
         }
-        if (DirectGroup.starting) return
-        if (retryJob?.isActive == true) return   // 正在等下一次重试
+        if (DirectGroup.starting) {
+            st(LinkKind.WORK, "正在创建热点…")
+            return
+        }
+        if (retryJob?.isActive == true) return   // 正在等下一次重试（状态已由 fail 设置）
 
         // 先扫一次：对方的热点在了就连，没有就自己建（谁先点开谁建）
         if (scanReqAt == 0L) {
+            st(LinkKind.WORK, "正在扫描 ${t.name} 的热点…")
             requestScan(wm)
             return
         }
@@ -450,10 +504,10 @@ object AutoLink {
     }
 
     private fun hostStep(app: Context) {
+        st(LinkKind.WORK, "没扫到对方的热点，正在创建本机热点…")
         DirectGroup.start(app, LinkCred.of(Identity.fp)) { msg ->
-            note("fail", msg)
             if (!LocationSwitch.isOn(app)) askLocation()
-            fail()
+            fail(msg)
         }
     }
 
@@ -462,17 +516,17 @@ object AutoLink {
         val cred = LinkCred.of(t.fp)
         val p = JoinParams(cred.ssid, cred.pwd, t.id, t.name, t.port, "", t.fp)
         joinedId = t.id
+        st(LinkKind.WORK, "正在连接 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
         clientJob = Hub.scope.launch {
             val done = CompletableDeferred<Boolean>()
             HotspotJoin.join(app, p, auto = true, done = done)
             if (done.await()) {
                 failures = 0
-                clear("notfound")
+                st(LinkKind.OK, "已连接：${t.name}")
             } else {
                 HotspotJoin.leave()
                 joinedId = null
-                note("notfound", "没连上对方：请确认对方也点开了你的对话框，并开着 Wi-Fi 开关，会自动重试")
-                fail()
+                fail("没连上 ${t.name}：请确认对方也点开了你的对话框，并开着 Wi-Fi 开关")
             }
         }
     }
@@ -495,6 +549,7 @@ object AutoLink {
         HotspotJoin.leave()
         DirectGroup.stop()
         joinedId = null
+        status.value = null
         scanReqAt = 0L
         scanDoneAt = 0L
         failures = 0
