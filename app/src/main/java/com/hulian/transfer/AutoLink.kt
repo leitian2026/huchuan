@@ -176,14 +176,18 @@ object DirectGroup {
 
 enum class LinkKind { WORK, OK, WARN }
 
+/** 点开对话框后（不在同一 Wi-Fi 时）由用户选的角色：建热点 / 接收信号（去连对方的热点） */
+enum class LinkRole { HOST, RECV }
+
 /** 对话框顶部显示的连接状态。action：""=无，"retry"=点一下重试，"location"=点一下去系统设置打开定位 */
 data class LinkStatus(val kind: LinkKind, val text: String, val action: String = "")
 
 /**
  * 点开某台已配对设备的对话框时自动用热点连接，离开对话框（或退出 app）自动断开：
  * - 平时没有任何热点。你点开对话框、对方也点开你的对话框（两边各自点开，不需要通知对方）
- * - 点开后先扫一次：对方的热点已经在了就去连；没有就自己建热点，谁先点开谁建，对方点开后会扫到并连过来
- * - 两边同时点开、各建了一个：设备 ID 小的保留，另一台撤掉自己的去连它
+ * - 点开后如果已经在同一个 Wi-Fi（对方局域网在线）就不用选；否则弹出“建热点 / 接收信号”，不再先扫描等待
+ * - 一边选建热点、一边选接收：直接连上。都选建热点：设备 ID 小的保留，另一台撤掉自己的改为接收
+ * - 都选接收：等 5 秒，对方热点还没出现，由设备 ID 小的那台自动改为建热点，ID 大的继续接收
  * - 热点名称和密码由主机自己的证书算出，所有已配对设备都能算出来，不用扫码；不需要选择、不弹窗
  * - 完全由事件触发，没有定时轮询（省电）：点开对话框、Wi-Fi / 定位开关变化、扫描结果、授权完成、设备上线下线、连接断开……才检查。
  *   监听只在 app 在前台时注册。只有“没连上 / 创建失败”时才按 3 秒起逐步拉长（最长 30 秒）的间隔重试，最多 15 次
@@ -195,6 +199,58 @@ object AutoLink {
 
     /** 当前连接状态（对话框顶部显示）；null 表示不显示 */
     val status = MutableStateFlow<LinkStatus?>(null)
+
+    /** 需要弹出“建热点 / 接收信号”的选择框 */
+    val needChoice = MutableStateFlow(false)
+    @Volatile private var role: LinkRole? = null
+    @Volatile private var choiceAsked = false
+    @Volatile private var recvHint = false
+    private var choiceJob: Job? = null
+    private var recvJob: Job? = null
+
+    /** 用户在选择框里做了选择 */
+    fun choose(r: LinkRole) {
+        needChoice.value = false
+        role = r
+        choiceAsked = false
+        recvHint = false
+        failures = 0
+        retryJob?.cancel()
+        retryJob = null
+        scanReqAt = 0L
+        recvJob?.cancel()
+        if (r == LinkRole.RECV) startRecvTimer() else recvJob = null
+        kick()
+    }
+
+    /**
+     * 选了“接收信号”后等 5 秒：对方的热点还没出现，说明对方可能也选了接收。
+     * 只由设备 ID 小的那台改为建热点（ID 大的继续等，不会两台同时改）；如果已经能看到对方的热点（正在加入），就不动。
+     */
+    private fun startRecvTimer() {
+        recvJob?.cancel()
+        recvJob = Hub.scope.launch {
+            delay(5_000)
+            val id = target ?: return@launch
+            val t = Hub.peers.value[id] ?: return@launch
+            val app = appCtx ?: return@launch
+            if (role != LinkRole.RECV || t.online || HotspotJoin.linked) return@launch
+            val wm = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            if (hasSignal(wm, t)) return@launch
+            if (Store.deviceId < t.id) {
+                role = LinkRole.HOST
+                clientJob?.cancel()
+                clientJob = null
+                HotspotJoin.leave()
+                joinedId = null
+                recvHint = false
+                kick()
+            } else {
+                recvHint = true
+                st(LinkKind.WORK, "对方可能也在接收，将自动由一方建热点，请稍等…")
+            }
+        }
+    }
 
     private fun st(kind: LinkKind, text: String, action: String = "") {
         status.value = LinkStatus(kind, text, action)
@@ -208,6 +264,7 @@ object AutoLink {
                 kick()
             }
             "location" -> LocationSwitch.openSettings(ctx)
+            "choose" -> needChoice.value = true
         }
     }
 
@@ -290,6 +347,12 @@ object AutoLink {
     /** 用户在聊天菜单里手动断开：这次对话框里不再自动重连 */
     fun pause() {
         paused = true
+        role = null
+        choiceAsked = false
+        recvHint = false
+        needChoice.value = false
+        choiceJob?.cancel()
+        recvJob?.cancel()
         st(LinkKind.WARN, "已手动断开。重新点开对话框才会再连")
         retryJob?.cancel()
         retryJob = null
@@ -347,6 +410,14 @@ object AutoLink {
             clientJob = null
             if (HotspotJoin.autoMode) HotspotJoin.leave()
             joinedId = null
+        }
+        if (target != peerId) {
+            role = null
+            choiceAsked = false
+            recvHint = false
+            needChoice.value = false
+            choiceJob?.cancel()
+            recvJob?.cancel()
         }
         target = peerId
         st(LinkKind.WORK, "正在准备连接…")
@@ -441,6 +512,47 @@ object AutoLink {
             status.value = null
             return
         }
+        // 已经连上对方的热点（或正在连）
+        if (HotspotJoin.active.value) {
+            when {
+                t.online -> st(LinkKind.OK, "已连接：${t.name}")
+                HotspotJoin.linked -> st(LinkKind.WORK, "已连上对方的热点，正在联系 ${t.name}…")
+                recvHint -> st(LinkKind.WORK, "对方可能也在接收，将自动由一方建热点，请稍等…")
+                else -> st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
+            }
+            return
+        }
+        // 对方已经通过同一个 Wi-Fi 在线（原来的局域网方式能用）：不用选，也不用建热点
+        if (t.online && !DirectGroup.up.value) {
+            st(LinkKind.OK, "已连接：${t.name}（同一 Wi-Fi）")
+            return
+        }
+        // 还没选角色：本机热点还留着就当作“建热点”，否则等一小会儿（让局域网有时间发现对方）再弹出选择
+        if (role == null) {
+            if (DirectGroup.up.value) {
+                role = LinkRole.HOST
+            } else {
+                if (choiceAsked) {
+                    st(LinkKind.WARN, "请选择：建热点 或 接收信号（点这里选择）", "choose")
+                } else {
+                    st(LinkKind.WORK, "正在检查是否在同一 Wi-Fi…")
+                    if (choiceJob?.isActive != true) {
+                        choiceJob = Hub.scope.launch {
+                            delay(1_500)
+                            val p = Hub.peers.value[id]
+                            if (role == null && target == id && p?.online != true &&
+                                !DirectGroup.up.value && !HotspotJoin.active.value
+                            ) {
+                                choiceAsked = true
+                                st(LinkKind.WARN, "请选择：建热点 或 接收信号（点这里选择）", "choose")
+                                needChoice.value = true
+                            }
+                        }
+                    }
+                }
+                return
+            }
+        }
         if (!hotspotCoreGranted(app)) {
             st(LinkKind.WARN, "需要授予" + hotspotPermName() + "权限，授权后自动继续")
             return
@@ -450,22 +562,16 @@ object AutoLink {
             st(LinkKind.WARN, "请打开 Wi-Fi 开关（不需要连接任何网络），打开后自动连接")
             return
         }
-        // 已经连上对方的热点
-        if (HotspotJoin.active.value) {
-            if (t.online) st(LinkKind.OK, "已连接：${t.name}")
-            else st(LinkKind.WORK, "已连上对方的热点，正在联系 ${t.name}…")
-            return
-        }
-        // 对方已经通过同一个 Wi-Fi 在线（原来的局域网方式能用）：不用再建热点
-        if (t.online && !DirectGroup.up.value) {
-            st(LinkKind.OK, "已连接：${t.name}（同一 Wi-Fi）")
-            return
-        }
         if (!ensureLocation(app)) {
             st(LinkKind.WARN, "需要打开系统的定位开关才能继续（点这里去设置）", "location")
             return
         }
 
+        // 选的是“接收信号”，但本机热点还开着（比如刚由建热点改成接收）：先关掉
+        if (role == LinkRole.RECV && (DirectGroup.up.value || DirectGroup.starting)) {
+            DirectGroup.stop()
+            return
+        }
         // 本机已建热点：核对一次对方是不是也同时建了，ID 小的保留
         if (DirectGroup.up.value) {
             failures = 0
@@ -474,7 +580,7 @@ object AutoLink {
                 recheckJob?.cancel()
                 recheckJob = null
             } else {
-                st(LinkKind.WORK, "热点已建好，等待 ${t.name} 点开你的对话框…")
+                st(LinkKind.WORK, "热点已建好，等待 ${t.name} 选择\u201c接收信号\u201d…")
                 armRecheck()
             }
             if (scanReqAt == 0L) {
@@ -484,6 +590,8 @@ object AutoLink {
             if (scanDoneAt < scanReqAt) return
             if (t.id < Store.deviceId && hasSignal(wm, t)) {
                 st(LinkKind.WORK, "${t.name} 也建了热点，改为连接对方的热点…")
+                role = LinkRole.RECV
+                recvHint = false
                 DirectGroup.stop()
                 scanReqAt = 0L
                 kick(reset = false)
@@ -498,19 +606,8 @@ object AutoLink {
         }
         if (retryJob?.isActive == true) return   // 正在等下一次重试（状态已由 fail 设置）
 
-        // 先扫一次：对方的热点在了就连，没有就自己建（谁先点开谁建）
-        if (scanReqAt == 0L) {
-            st(LinkKind.WORK, "正在扫描 ${t.name} 的热点…")
-            requestScan(wm)
-            return
-        }
-        if (scanDoneAt < scanReqAt) return
-        if (hasSignal(wm, t)) {
-            clientStep(app, t)
-        } else {
-            scanReqAt = 0L   // 建好后再核对一次
-            hostStep(app)
-        }
+        // 不再先扫描等待：选了建热点就直接建，选了接收就直接去连对方的热点（系统会自己等它出现）
+        if (role == LinkRole.HOST) hostStep(app) else clientStep(app, t)
     }
 
     /**
@@ -530,7 +627,7 @@ object AutoLink {
     }
 
     private fun hostStep(app: Context) {
-        st(LinkKind.WORK, "没扫到对方的热点，正在创建本机热点…")
+        st(LinkKind.WORK, "正在创建本机热点…")
         DirectGroup.start(app, LinkCred.of(Identity.fp)) { msg ->
             if (!LocationSwitch.isOn(app)) askLocation()
             fail(msg)
@@ -542,7 +639,7 @@ object AutoLink {
         val cred = LinkCred.of(t.fp)
         val p = JoinParams(cred.ssid, cred.pwd, t.id, t.name, t.port, "", t.fp)
         joinedId = t.id
-        st(LinkKind.WORK, "正在连接 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
+        st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
         clientJob = Hub.scope.launch {
             val done = CompletableDeferred<Boolean>()
             HotspotJoin.join(app, p, auto = true, done = done)
@@ -552,7 +649,7 @@ object AutoLink {
             } else {
                 HotspotJoin.leave()
                 joinedId = null
-                fail("没连上 ${t.name}：请确认对方也点开了你的对话框，并开着 Wi-Fi 开关")
+                fail("没连上 ${t.name}：请确认对方选了\u201c建热点\u201d，并开着 Wi-Fi 开关")
             }
         }
     }
@@ -572,6 +669,12 @@ object AutoLink {
         scanTimer?.cancel()
         recheckJob?.cancel()
         recheckJob = null
+        choiceJob?.cancel()
+        recvJob?.cancel()
+        role = null
+        choiceAsked = false
+        recvHint = false
+        needChoice.value = false
         clientJob?.cancel()
         clientJob = null
         HotspotJoin.leave()
