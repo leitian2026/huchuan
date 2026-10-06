@@ -237,7 +237,7 @@ object Hub {
                 if (tick % 3 == 0) probeKnown()
 
                 val hotspotOn = HotspotHost.payload.value != null
-                if (!AutoLink.running && (hotspotOn || HotspotJoin.active.value) && t - lastActivity > 180_000 &&
+                if ((hotspotOn || (HotspotJoin.active.value && !HotspotJoin.autoMode)) && t - lastActivity > 180_000 &&
                     _msgs.value.none { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }
                 ) {
                     HotspotJoin.leave()
