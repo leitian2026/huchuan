@@ -284,7 +284,7 @@ fun AppRoot() {
 // ---------------- 通用组件 ----------------
 
 @Composable
-fun TopBar(title: String, onBack: (() -> Unit)?, onTitleClick: (() -> Unit)? = null,  actions: @Composable RowScope.() -> Unit = {}) {
+fun TopBar(title: String, onBack: (() -> Unit)?, titleContent: (@Composable () -> Unit)? = null, actions: @Composable RowScope.() -> Unit = {}) {
     // 渐变背景先画，再加状态栏内边距：渐变会一直铺到屏幕最顶端，和状态栏融为一体
     Box(
         Modifier.fillMaxWidth()
@@ -302,10 +302,11 @@ fun TopBar(title: String, onBack: (() -> Unit)?, onTitleClick: (() -> Unit)? = n
             } else {
                 Spacer(Modifier.width(12.dp))
             }
-            Text(
-                title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).let { if (onTitleClick != null) it.clickable(onClick = onTitleClick) else it }
-            )
+            if (titleContent != null) {
+                Box(Modifier.weight(1f)) { titleContent() }
+            } else {
+                Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            }
             actions()
         }
     }
@@ -418,13 +419,30 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     val linkActive = joinActive || hsPayload != null || groupUp
     var more by remember { mutableStateOf(false) }
 
-    // 顶栏标题直接显示自动连接状态（扫描 / 创建热点 / 连接中 / 已连接 / 失败原因）；没有状态时才显示设备名
+    // 顶栏里原来“红米k30”的位置直接显示自动连接状态，字号/颜色/转圈和原来的状态条完全一致；没有状态时才显示设备名
     val link by AutoLink.status.collectAsState()
-    val fullTitle = link?.text ?: title
-    val titleClick: (() -> Unit)? = link?.takeIf { it.action.isNotEmpty() }?.let { { AutoLink.onStatusClick(ctx) } }
+    val statusTitle: (@Composable () -> Unit)? = link?.let { st ->
+        {
+            val fg = when (st.kind) {
+                LinkKind.OK -> Color(0xFF2E7D32)
+                LinkKind.WARN -> Color(0xFFE65100)
+                LinkKind.WORK -> Color(0xFF1565C0)
+            }
+            Row(
+                Modifier.clickable(enabled = st.action.isNotEmpty()) { AutoLink.onStatusClick(ctx) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (st.kind == LinkKind.WORK) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = fg)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(st.text, color = fg, fontSize = 13.sp)
+            }
+        }
+    }
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopBar(fullTitle, onBack, titleClick) {
+        TopBar(title, onBack, statusTitle) {
             Box {
                 IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
                 DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
