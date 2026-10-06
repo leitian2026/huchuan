@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        AutoLink.resume()
         setContent { HulianTheme { AppRoot() } }
         // 前台服务不依赖通知权限，直接启动；权限在首次使用时由界面统一说明并申请
         ContextCompat.startForegroundService(this, Intent(this, TransferService::class.java))
