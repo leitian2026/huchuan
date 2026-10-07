@@ -279,7 +279,7 @@ fun AppRoot() {
             text = {
                 Text(
                     "创建热点需要系统的\u201c定位\u201d开关。点\u201c去打开\u201d，打开后回到互传，会自动继续。\n\n" +
-                        "想让互传以后自动开关定位：在电脑上执行一次\nadb shell pm grant com.hulian.transfer android.permission.WRITE_SECURE_SETTINGS",
+                        "想让互传以后自动开关定位：有 root 的手机给互传授权 root 即可；没有 root，就在电脑上执行一次\nadb shell pm grant com.hulian.transfer android.permission.WRITE_SECURE_SETTINGS",
                     fontSize = 14.sp
                 )
             },
@@ -484,7 +484,6 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     LaunchedEffect(all.size) { if (Hub.appVisible) Hub.markRead(peerId) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        Hub.picking = false
         uris.forEach {
             try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { Hub.log("记住文件读取权限", e) }
             Hub.sendFile(peerId, it)
