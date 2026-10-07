@@ -530,9 +530,26 @@ object P2pJoin {
         running = false
         if (m != null && c != null) {
             try { m.cancelConnect(c, null) } catch (_: Exception) {}
-            try { m.removeGroup(c, null) } catch (_: Exception) {}
-            // 取消 / 退出是异步的，稍后再释放通道
-            h.postDelayed({ try { c.close() } catch (_: Exception) {} }, 1500)
+            release(m, c, 3)
         }
+    }
+
+    /** 退出群组；失败了确认还在群组里就重试（有的系统第一次会返回“正忙”），完成后再释放通道 */
+    @SuppressLint("MissingPermission")
+    private fun release(m: WifiP2pManager, c: WifiP2pManager.Channel, left: Int) {
+        fun closeLater() { h.postDelayed({ try { c.close() } catch (_: Exception) {} }, 1500) }
+        try {
+            m.removeGroup(c, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { closeLater() }
+
+                override fun onFailure(reason: Int) {
+                    try {
+                        m.requestGroupInfo(c) { g ->
+                            if (g != null && left > 0) h.postDelayed({ release(m, c, left - 1) }, 1000) else closeLater()
+                        }
+                    } catch (_: Exception) { closeLater() }
+                }
+            })
+        } catch (_: Exception) { closeLater() }
     }
 }
