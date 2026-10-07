@@ -5,7 +5,7 @@ Android 局域网互传：文字、文件、已安装应用（仅 apk，不含�
 - 同一 Wi-Fi：mDNS 自动发现，免扫码；找不到时可扫二维码
 - 无 Wi-Fi：一方“创建热点”显示二维码，另一方扫码连接；首次配对时谁开二维码，以后谁就建热点，扫码的一方自动去连，不再弹窗选择
 - 接收位置：设置里选一次文件夹，之后记住；未选时存到 下载/互传
-- 构建：推送到 GitHub 后，Actions「Build Debug APK」产出 APK（Artifacts 里下载）
+- 构建：手动触发。GitHub 仓库 → Actions →「Build Debug APK」→ Run workflow，完成后在 Artifacts 里下载 APK（推送代码不会自动构建）
 - 仓库里带了固定的 debug 签名（app/debug.keystore），每次构建签名一致，可直接覆盖安装
 
 协议：TCP，一次连接一条消息 `[4字节头长][JSON头][文件内容]`，对方回 1 字节确认。
