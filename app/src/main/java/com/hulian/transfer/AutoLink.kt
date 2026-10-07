@@ -39,7 +39,7 @@ data class LinkStatus(val kind: LinkKind, val text: String, val action: String =
  * - 万一两台都建了热点：设备 ID 小的保留，另一台撤掉自己的改为连接
  * - 热点名称和密码由主机自己的证书算出，所有已配对设备都能算出来，不用扫码、不弹窗
  * - 完全由事件触发，没有定时轮询（省电）：点开对话框、Wi-Fi / 定位开关变化、扫描结果、授权完成、设备上线下线、连接断开……才检查。
- *   监听只在 app 在前台时注册。只有“没连上 / 创建失败”时才按 3 秒起逐步拉长（最长 30 秒）的间隔重试，最多 15 次
+ *   监听只在 app 在前台时注册。只有“没连上 / 创建失败”时才每 2 秒重试一次，最多 12 次
  * - 只关本 app 自己建的群组、自己改开的定位；手动开的 / 别的软件开的一律不碰
  */
 object AutoLink {
@@ -120,9 +120,9 @@ object AutoLink {
         kicks.trySend(Unit)
     }
 
-    /** 失败后重试：每 2 秒一次，共 4 次 */
+    /** 失败后重试：每 2 秒一次，共 12 次（单次连接最长 12 秒，对方晚建热点时靠重新发起连接来重新搜索，总共能等约 3 分钟） */
     private const val RETRY_MS = 2_000L
-    private const val RETRY_MAX = 4
+    private const val RETRY_MAX = 12
 
     /** 热点已建好、等对方时的核对：每 2 秒一次，共 6 次 */
     private const val RECHECK_MS = 2_000L
@@ -137,7 +137,7 @@ object AutoLink {
         }
     }
 
-    /** 失败后重试：每 2 秒一次，最多 4 次，之后等下一次事件 */
+    /** 失败后重试：每 2 秒一次，最多 12 次，之后等下一次事件 */
     private fun fail(reason: String) {
         failures++
         scanReqAt = 0L
