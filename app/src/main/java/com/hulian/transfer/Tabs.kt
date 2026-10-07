@@ -1,31 +1,20 @@
 package com.hulian.transfer
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Email
@@ -39,28 +28,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 // ---------------- 首页：消息 / 设备 / 我 ----------------
 
@@ -223,6 +197,8 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
             .sortedWith(compareByDescending<Peer> { it.online }.thenByDescending { it.lastSeen })
     }
     val onlineCount = peers.values.count { it.online }
+    var menuFor by remember { mutableStateOf<String?>(null) }      // 哪一行的“更多”菜单开着
+    var confirmDel by remember { mutableStateOf<Peer?>(null) }     // 等用户确认删除的设备
     Column(Modifier.fillMaxSize().background(Color.White)) {
         TextField(
             value = q, onValueChange = { q = it }, singleLine = true,
@@ -270,10 +246,25 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
                                 fontSize = 13.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Box {
+                            IconButton(onClick = { menuFor = p.id }) { Icon(Icons.Default.MoreVert, "更多", tint = Gray) }
+                            DropdownMenu(expanded = menuFor == p.id, onDismissRequest = { menuFor = null }) {
+                                DropdownMenuItem(text = { Text("删除设备") }, onClick = { menuFor = null; confirmDel = p })
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+    confirmDel?.let { p ->
+        AlertDialog(
+            onDismissRequest = { confirmDel = null },
+            title = { Text("删除设备") },
+            text = { Text("确定删除\u201c${p.name}\u201d吗？和它的聊天记录会一起删除，以后要再用，需要重新扫码配对。") },
+            confirmButton = { TextButton(onClick = { confirmDel = null; Hub.forgetPeer(p.id) }) { Text("删除") } },
+            dismissButton = { TextButton(onClick = { confirmDel = null }) { Text("取消") } }
+        )
     }
 }
 
