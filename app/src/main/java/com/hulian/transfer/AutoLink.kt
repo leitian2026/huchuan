@@ -49,11 +49,18 @@ object AutoLink {
     /** 当前连接状态（对话框顶部显示）；null 表示不显示 */
     val status = MutableStateFlow<LinkStatus?>(null)
 
+    /** 给界面列表显示用：(设备 ID, 本机面对它的角色)。role 每次改变（定下、互换、清空）都会同步到这里 */
+    val roleState = MutableStateFlow<Pair<String, LinkRole>?>(null)
+
     /** 本次对话框里本机的角色；null 表示还没确定（step 里按配对时的记录定下） */
     @Volatile private var role: LinkRole? = null
+        set(v) {
+            field = v
+            roleState.value = v?.let { r -> target?.let { id -> id to r } }
+        }
 
     /** 本机对这台设备的角色：首次配对时谁开的二维码谁建热点；旧数据没记录就按设备 ID（小的建热点），两边算出来一致 */
-    private fun roleFor(t: Peer): LinkRole = when (t.iHost) {
+    fun roleFor(t: Peer): LinkRole = when (t.iHost) {
         true -> LinkRole.HOST
         false -> LinkRole.RECV
         null -> if (Store.deviceId < t.id) LinkRole.HOST else LinkRole.RECV
