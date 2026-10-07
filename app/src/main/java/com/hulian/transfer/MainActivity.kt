@@ -21,6 +21,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         Hub.appVisible = true
+        // 从 root 管理器授权回来：重新检测一次，授权了标签就消失
+        if (Root.consumeRecheck()) Root.refresh(force = true)
         // 回到前台时，正在看的聊天里在后台期间收到的消息算已读，并清掉对应通知
         Hub.openPeer?.let { Hub.markRead(it) }
         // Android 13+：之前拒绝过通知权限的话，每次启动再请求一次（系统若已永久拒绝则不会弹窗）
