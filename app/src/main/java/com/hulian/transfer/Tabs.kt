@@ -116,9 +116,10 @@ fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
                 if (rootOk == false) {
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "没有root", color = Color.White, fontSize = 11.sp, lineHeight = 11.sp, maxLines = 1,
+                        "没有root", color = Color(0xFFD93025), fontSize = 12.sp, lineHeight = 12.sp,
+                        fontWeight = FontWeight.Bold, maxLines = 1,
                         modifier = Modifier.clip(RoundedCornerShape(9.dp))
-                            .background(Color(0x40FFFFFF))
+                            .background(Color.White)
                             .clickable {
                                 Hub.toast("正在重新检测 root…")
                                 Root.refresh(force = true)
