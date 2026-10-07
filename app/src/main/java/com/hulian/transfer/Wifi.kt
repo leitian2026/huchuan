@@ -92,7 +92,14 @@ object HotspotHost {
                 override fun onFailed(reason: Int) {
                     starting = false
                     payload.value = null
-                    error.value = "热点启动失败（代码 $reason）。请确认已打开系统的\u201c定位\u201d开关，并关闭本机正在使用的个人热点后重试。也可以不用本功能：自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
+                    val why = when (reason) {
+                        ERROR_NO_CHANNEL -> "没有可用的无线信道"
+                        ERROR_GENERIC -> "系统内部错误"
+                        ERROR_INCOMPATIBLE_MODE -> "与当前 Wi-Fi 连接冲突，本机不能同时连着 Wi-Fi 又建热点"
+                        ERROR_TETHERING_DISALLOWED -> "系统禁止本机创建热点"
+                        else -> "未知原因"
+                    }
+                    error.value = "热点启动失败：$why（代码 $reason）。请确认已打开系统的\u201c定位\u201d开关，并关闭本机正在使用的个人热点后重试。也可以不用本功能：自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
                 }
             }, Handler(Looper.getMainLooper()))
         } catch (e: Exception) {
@@ -106,7 +113,7 @@ object HotspotHost {
     }
 
     fun stop() {
-        try { reservation?.close() } catch (_: Exception) {}
+        try { reservation?.close() } catch (e: Exception) { Hub.log("Wifi", e) }
         reservation = null
         starting = false
         curSsid = ""
@@ -132,6 +139,9 @@ object HotspotJoin {
     val needPerm = MutableStateFlow<JoinParams?>(null)
     /** 自动连接用不了（没权限 / 被系统拒绝 / 超时）：让用户手动连，连上后继续配对 */
     val manual = MutableStateFlow<JoinParams?>(null)
+
+    /** 自动连接用不了的具体原因（手动连接窗口里显示） */
+    val manualReason = MutableStateFlow("")
     /** 当前这次连接是自动连接（打开 app 自动连固定热点）：空闲不自动断 */
     @Volatile var autoMode = false
     /** 已经真正连上对方的热点（拿到了网关地址）；active 只表示“正在连或已连上” */
@@ -203,6 +213,7 @@ object HotspotJoin {
                     done?.complete(false)
                 } else {
                     // 自动连接没成功（用户取消、系统不弹窗或超时）：提供手动连接的办法
+                    manualReason.value = "15 秒内没有连上对方热点：系统弹出的“连接”窗口被取消或没有点，或热点名称 / 密码不对，或对方的热点已经关闭"
                     manual.value = p
                 }
             }
@@ -212,7 +223,7 @@ object HotspotJoin {
                 active.value = false
                 done?.complete(false)
                 if (!auto) status.value = "热点连接已断开"
-                try { m.bindProcessToNetwork(null) } catch (_: Exception) {}
+                try { m.bindProcessToNetwork(null) } catch (e: Exception) { Hub.log("Wifi", e) }
                 clearStatusLater()
             }
         }
@@ -224,7 +235,10 @@ object HotspotJoin {
             callback = null
             active.value = false
             status.value = ""
-            if (auto) done?.complete(false) else manual.value = p
+            if (auto) done?.complete(false) else {
+                manualReason.value = "系统拒绝了连接请求：" + (e.message ?: e.javaClass.simpleName)
+                manual.value = p
+            }
         }
     }
 
@@ -267,19 +281,19 @@ object HotspotJoin {
     /** Wi-Fi 没有网络时系统默认走流量，访问不到里面的对方；绑定到这个 Wi-Fi 才行。Wi-Fi 断开时自动解除 */
     private fun bindTo(m: ConnectivityManager, net: Network) {
         cm = m
-        try { m.bindProcessToNetwork(net) } catch (_: Exception) { return }
+        try { m.bindProcessToNetwork(net) } catch (e: Exception) { Hub.log("绑定到对方 Wi-Fi", e); return }
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onLost(n: Network) {
                 if (n == net) {
                     active.value = false
-                    try { m.bindProcessToNetwork(null) } catch (_: Exception) {}
+                    try { m.bindProcessToNetwork(null) } catch (e: Exception) { Hub.log("Wifi", e) }
                 }
             }
         }
         callback = cb
         try {
             m.registerNetworkCallback(NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), cb)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Wifi", e) }
         active.value = true
     }
 
@@ -289,6 +303,7 @@ object HotspotJoin {
         val found = findWifi(m)
         if (found == null) {
             Hub.toast("还没有连上 Wi-Fi，请先在系统设置里连接对方的热点")
+            manualReason.value = "本机还没有在系统里连上对方的热点"
             manual.value = p
             return
         }
@@ -359,20 +374,20 @@ object HotspotJoin {
         try {
             ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("wifi", pwd))
             Hub.toast("密码已复制")
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Wifi", e) }
     }
 
     fun openWifiSettings(ctx: Context) {
         try {
             ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Wifi", e) }
     }
 
     /** 断开对方热点；系统会自动回到原来的 Wi-Fi */
     fun leave() {
         P2pJoin.leave()
-        try { cm?.bindProcessToNetwork(null) } catch (_: Exception) {}
-        callback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
+        try { cm?.bindProcessToNetwork(null) } catch (e: Exception) { Hub.log("Wifi", e) }
+        callback?.let { try { cm?.unregisterNetworkCallback(it) } catch (e: Exception) { Hub.log("Wifi", e) } }
         callback = null
         linked = false
         active.value = false
@@ -499,7 +514,7 @@ object P2pJoin {
                 addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
             }
             ContextCompat.registerReceiver(app, r, f, ContextCompat.RECEIVER_NOT_EXPORTED)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Wifi", e) }
 
         val cfg = try {
             WifiP2pConfig.Builder().setNetworkName(p.ssid).setPassphrase(p.pwd).enablePersistentMode(false).build()
@@ -507,7 +522,7 @@ object P2pJoin {
             finish(false, "（群组参数无效）")
             return
         }
-        val t = Runnable { finish(false, "（等待对方群组超时）") }
+        val t = Runnable { finish(false, "（30 秒内没有加入对方的群组：对方可能已离开二维码页面、没有建成群组，或两台手机离得太远）") }
         timeout = t
         h.postDelayed(t, CONNECT_TIMEOUT_MS)
         try {
@@ -518,7 +533,9 @@ object P2pJoin {
                     finish(
                         false, when (reason) {
                             WifiP2pManager.P2P_UNSUPPORTED -> "（本机不支持 Wi-Fi Direct）"
-                            WifiP2pManager.BUSY -> "（Wi-Fi Direct 正忙）"
+                            WifiP2pManager.BUSY -> "（Wi-Fi Direct 正忙：可能正在连别的设备，或系统还在拆掉上一个连接，请等几秒再试）"
+                            WifiP2pManager.ERROR -> "（Wi-Fi Direct 内部错误，代码 0：请关闭再打开 Wi-Fi 后重试）"
+                            WifiP2pManager.NO_SERVICE_REQUESTS -> "（Wi-Fi Direct 没有可用的服务，代码 3）"
                             else -> "（系统返回错误 $reason）"
                         }
                     )
@@ -536,7 +553,7 @@ object P2pJoin {
     fun leave() {
         timeout?.let { h.removeCallbacks(it) }
         timeout = null
-        rx?.let { try { appCtx?.unregisterReceiver(it) } catch (_: Exception) {} }
+        rx?.let { try { appCtx?.unregisterReceiver(it) } catch (e: Exception) { Hub.log("Wifi", e) } }
         rx = null
         if (!running) return
         val m = mgr
@@ -545,7 +562,7 @@ object P2pJoin {
         ch = null
         running = false
         if (m != null && c != null) {
-            try { m.cancelConnect(c, null) } catch (_: Exception) {}
+            try { m.cancelConnect(c, null) } catch (e: Exception) { Hub.log("Wifi", e) }
             release(m, c, 3)
         }
     }
@@ -553,7 +570,7 @@ object P2pJoin {
     /** 退出群组；失败了确认还在群组里就重试（有的系统第一次会返回“正忙”），完成后再释放通道 */
     @SuppressLint("MissingPermission")
     private fun release(m: WifiP2pManager, c: WifiP2pManager.Channel, left: Int) {
-        fun closeLater() { h.postDelayed({ try { c.close() } catch (_: Exception) {} }, 1500) }
+        fun closeLater() { h.postDelayed({ try { c.close() } catch (e: Exception) { Hub.log("Wifi", e) } }, 1500) }
         try {
             m.removeGroup(c, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() { closeLater() }
