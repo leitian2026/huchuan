@@ -87,6 +87,11 @@ object DirectGroup {
     @Volatile var starting = false
         private set
 
+    /** 创建还没出结果时就被要求关闭：创建一成功立刻拆掉，不然群组会一直留着没人管 */
+    @Volatile private var stopWhenReady = false
+
+    private val h = Handler(Looper.getMainLooper())
+
     private fun reasonText(r: Int) = when (r) {
         WifiP2pManager.P2P_UNSUPPORTED -> "本机不支持 Wi-Fi Direct"
         WifiP2pManager.BUSY -> "Wi-Fi Direct 正忙（可能本机正连着 Wi-Fi 且芯片不能同时用，或有别的 Wi-Fi Direct 连接）"
@@ -102,6 +107,7 @@ object DirectGroup {
         mgr = m
         ch = c
         starting = true
+        stopWhenReady = false
         // 系统偶尔一直不回调：15 秒还没出结果就当失败，别让界面一直卡在“正在创建”
         Handler(Looper.getMainLooper()).postDelayed({
             if (starting) {
@@ -112,9 +118,14 @@ object DirectGroup {
         try {
             m.requestGroupInfo(c) { g ->
                 if (g != null && g.networkName == cred.ssid) {
-                    // 已经是我们的群组（上次没来得及关）：直接沿用
-                    up.value = true
+                    // 已经是我们的群组（上次没来得及关）：直接沿用；但如果等结果期间已经被要求关闭，就直接拆掉
                     starting = false
+                    if (stopWhenReady) {
+                        stopWhenReady = false
+                        removeWithRetry(m, c, 3)
+                    } else {
+                        up.value = true
+                    }
                 } else if (g != null) {
                     // 别的软件 / 用户自己建的 Wi-Fi Direct：不动它
                     starting = false
@@ -136,8 +147,13 @@ object DirectGroup {
                 .enablePersistentMode(false).build()
             m.createGroup(c, cfg, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
-                    up.value = true
                     starting = false
+                    if (stopWhenReady) {
+                        stopWhenReady = false
+                        removeWithRetry(m, c, 3)
+                        return
+                    }
+                    up.value = true
                 }
 
                 override fun onFailure(reason: Int) {
@@ -162,15 +178,59 @@ object DirectGroup {
         } catch (_: Exception) {}
     }
 
+    /**
+     * 关掉本 app 建的群组。以前只在“记录里群组在运行”时才关：记录和系统不一致（创建中被关、系统回调晚到、检查时误判没了）
+     * 就会漏关，群组一直留着、对方一直连着。现在只要有通道就发关闭请求，失败了确认群组还在就重试
+     */
     @SuppressLint("MissingPermission")
     fun stop() {
         val m = mgr
         val c = ch
-        if (up.value && m != null && c != null) {
-            try { m.removeGroup(c, null) } catch (_: Exception) {}
-        }
+        stopWhenReady = starting
         up.value = false
         starting = false
+        if (m != null && c != null) removeWithRetry(m, c, 3)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun removeWithRetry(m: WifiP2pManager, c: WifiP2pManager.Channel, left: Int) {
+        try {
+            m.removeGroup(c, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {}
+
+                override fun onFailure(reason: Int) {
+                    // 没有群组时也会返回失败，所以先确认群组真的还在，再重试
+                    if (left <= 0) return
+                    try {
+                        m.requestGroupInfo(c) { g ->
+                            if (g != null && g.networkName.startsWith("DIRECT-hl-")) {
+                                h.postDelayed({ if (!up.value && !starting) removeWithRetry(m, c, left - 1) }, 1000)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            })
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 本次启动后还没建过群组时调用一次：上次 app 被系统杀掉 / 崩溃，没来得及关的群组会一直留着，
+     * 对方还连在上面，这里把它拆掉。只拆名称是本 app 固定前缀的，别的软件 / 用户自己建的不碰
+     */
+    @SuppressLint("MissingPermission")
+    fun cleanupStale(ctx: Context) {
+        if (mgr != null || up.value || starting) return
+        val app = ctx.applicationContext
+        if (!hotspotCoreGranted(app)) return
+        val m = app.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager ?: return
+        try {
+            val c = m.initialize(app, Looper.getMainLooper(), null)
+            m.requestGroupInfo(c) { g ->
+                if (g != null && g.isGroupOwner && g.networkName.startsWith("DIRECT-hl-") && mgr == null && !up.value && !starting) {
+                    removeWithRetry(m, c, 3)
+                }
+            }
+        } catch (_: Exception) {}
     }
 }
 
@@ -632,6 +692,34 @@ object AutoLink {
             LocationSwitch.set(Hub.app, false)
             Store.ownLocation = false
         }
+    }
+
+    /**
+     * 出示二维码 / 扫码配对之前调用：把自动连接留下的状态全部清掉（本机建的群组、加入的群组、重试和等待、状态条）。
+     * Wi-Fi 芯片没法同时处理上一个方向留下的群组和配对用的临时热点，所以要先关干净再开始。
+     * 有文件正在传输时不动（不能把传输掐断）。返回 true 表示确实关掉了东西，调用方要等一小会儿让系统拆完
+     */
+    fun releaseForPairing(): Boolean {
+        if (Hub.msgs.value.any { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }) return false
+        val had = DirectGroup.up.value || DirectGroup.starting || HotspotJoin.active.value || P2pJoin.running
+        target = null
+        retryJob?.cancel()
+        retryJob = null
+        scanTimer?.cancel()
+        recheckJob?.cancel()
+        recheckJob = null
+        recheckN = 0
+        role = null
+        clientJob?.cancel()
+        clientJob = null
+        joinedId = null
+        failures = 0
+        scanReqAt = 0L
+        scanDoneAt = 0L
+        status.value = null
+        HotspotJoin.leave()
+        DirectGroup.stop()
+        return had
     }
 
     /** 退出 app：等传输结束（最多 10 分钟），然后只关本 app 自己开的 */
