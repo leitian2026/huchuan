@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,10 +77,36 @@ sealed interface Screen {
     data object MyQr : Screen
 }
 
+private val ScreenStackSaver = listSaver<MutableState<List<Screen>>, String>(
+    save = { st ->
+        st.value.map {
+            when (it) {
+                is Screen.Home -> "H"
+                is Screen.Connect -> "C"
+                is Screen.MyQr -> "Q"
+                is Screen.Chat -> "T:" + it.peerId
+                is Screen.Picker -> "P:" + it.peerId
+            }
+        }
+    },
+    restore = { l ->
+        mutableStateOf(l.map {
+            when {
+                it == "C" -> Screen.Connect
+                it == "Q" -> Screen.MyQr
+                it.startsWith("T:") -> Screen.Chat(it.substring(2))
+                it.startsWith("P:") -> Screen.Picker(it.substring(2))
+                else -> Screen.Home
+            }
+        }.ifEmpty { listOf(Screen.Home) })
+    }
+)
+
 @Composable
 fun AppRoot() {
     val ctx = LocalContext.current
-    var stack by remember { mutableStateOf<List<Screen>>(listOf(Screen.Home)) }
+    // 用 rememberSaveable：界面被系统回收重建后，仍停在原来的对话框，不会被甩回首页
+    var stack by rememberSaveable(stateSaver = ScreenStackSaver) { mutableStateOf<List<Screen>>(listOf(Screen.Home)) }
     var tab by remember { mutableStateOf(0) }
     fun chatOf(s: List<Screen>): String? = s.filterIsInstance<Screen.Chat>().lastOrNull()?.peerId
     // 所有页面切换都走这里：离开某个对话框时（bye=true）通知对方也退出；
@@ -439,7 +467,8 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     // 点开对话框：自动用热点连接这台设备；离开对话框：传输结束后自动断开
     DisposableEffect(peerId) {
         AutoLink.open(ctx, peerId)
-        onDispose { AutoLink.close() }
+        // 界面被系统销毁重建时不断开：新界面马上会再进同一个对话框
+        onDispose { if (!Hub.recreating) AutoLink.close() }
     }
     val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
     val ls = rememberLazyListState()
@@ -455,6 +484,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     LaunchedEffect(all.size) { if (Hub.appVisible) Hub.markRead(peerId) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        Hub.picking = false
         uris.forEach {
             try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { Hub.log("记住文件读取权限", e) }
             Hub.sendFile(peerId, it)
@@ -547,7 +577,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
             Box {
                 IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; picker.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; Hub.picking = true; picker.launch(arrayOf("*/*")) })
                     DropdownMenuItem(text = { Text("发送应用") }, onClick = { menuOpen = false; onPickApps() })
                 }
             }
