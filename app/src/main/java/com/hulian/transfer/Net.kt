@@ -202,7 +202,7 @@ object Net {
      * 用来判断“同一 Wi-Fi”：对方的在线标记可能是上一次连接留下的、还没来得及过期，不能只看标记
      */
     fun onLan(host: String): Boolean = try {
-        val target = java.net.InetAddress.getByName(host).address
+        val target = InetAddress.getByName(host).address
         target.size == 4 && Collections.list(NetworkInterface.getNetworkInterfaces())
             .filter {
                 it.isUp && !it.isLoopback &&
@@ -211,46 +211,21 @@ object Net {
             .any { ni ->
                 ni.interfaceAddresses.any { ia ->
                     val a = ia.address
-                    if (a !is Inet4Address) {
-                        false
-                    } else {
-                        val ab = a.address
-                        val bits = ia.networkPrefixLength.toInt()
-                        var same = true
-                        for (i in 0 until bits) {
-                            val mask = 0x80 shr (i % 8)
-                            if ((ab[i / 8].toInt() and mask) != (target[i / 8].toInt() and mask)) {
-                                same = false
-                                break
-                            }
-                        }
-                        same
-                    }
+                    a is Inet4Address && samePrefix(a.address, target, ia.networkPrefixLength.toInt())
                 }
             }
     } catch (e: Exception) {
+        Hub.log("判断对方是否在同一局域网", e)
         false
     }
 
-    /** 系统里是否已经有热点在运行（手动开的 / 别的软件开的 / 本 app 的本地热点），看热点网卡是否有 IPv4 */
-    fun apActive(): Boolean = try {
-        Collections.list(NetworkInterface.getNetworkInterfaces()).any { n ->
-            n.isUp && !n.isLoopback &&
-                (n.name.startsWith("swlan") || n.name.startsWith("softap") || n.name.startsWith("ap")) &&
-                Collections.list(n.inetAddresses).any { it is Inet4Address }
+    /** 两个 IPv4 地址的前 bits 位是否相同（即是否在同一网段） */
+    fun samePrefix(addr: ByteArray, target: ByteArray, bits: Int): Boolean {
+        for (i in 0 until bits) {
+            val mask = 0x80 shr (i % 8)
+            if ((addr[i / 8].toInt() and mask) != (target[i / 8].toInt() and mask)) return false
         }
-    } catch (e: Exception) {
-        false
-    }
-
-    fun localIps(): List<String> = try {
-        Collections.list(NetworkInterface.getNetworkInterfaces())
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { Collections.list(it.inetAddresses) }
-            .filter { it is Inet4Address && !it.isLoopbackAddress }
-            .mapNotNull { it.hostAddress }
-    } catch (e: Exception) {
-        emptyList()
+        return true
     }
 }
 
