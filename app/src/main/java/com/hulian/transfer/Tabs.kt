@@ -94,6 +94,8 @@ fun HomeTabs(
 fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     val rootOk by Root.available.collectAsState()
+    val rootDenied by Root.denied.collectAsState()
+    val ctx = LocalContext.current
     Box(
         Modifier.fillMaxWidth()
             .background(Brush.horizontalGradient(listOf(Blue1, Blue2)))
@@ -112,17 +114,26 @@ fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
             }
             Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
                 Text(title, color = Color.White, fontSize = 18.sp)
-                // 没有 root（或没授权）：Wi-Fi / 定位没法自动打开，在标题旁边提示；点一下重新检测
+                // 没有 root：提示一下，点一下重新检测。已 root 但没授权：点一下去 root 管理器里授权
                 if (rootOk == false) {
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "没有root", color = Color(0xFFD93025), fontSize = 12.sp, lineHeight = 12.sp,
+                        if (rootDenied) "已root 未授权" else "没有root",
+                        color = if (rootDenied) Color(0xFFE8590C) else Color(0xFFD93025),
+                        fontSize = 12.sp, lineHeight = 12.sp,
                         fontWeight = FontWeight.Bold, maxLines = 1,
                         modifier = Modifier.clip(RoundedCornerShape(9.dp))
                             .background(Color.White)
                             .clickable {
-                                Hub.toast("正在重新检测 root…")
-                                Root.refresh(force = true)
+                                if (rootDenied) {
+                                    if (!Root.openManager(ctx)) {
+                                        Hub.toast("没找到 root 管理器，请在里面给互传授权 root")
+                                        Root.refresh(force = true)
+                                    }
+                                } else {
+                                    Hub.toast("正在重新检测 root…")
+                                    Root.refresh(force = true)
+                                }
                             }
                             .padding(horizontal = 7.dp, vertical = 3.dp)
                     )
