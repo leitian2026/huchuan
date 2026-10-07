@@ -307,7 +307,7 @@ fun SettingsContent() {
                 Store.saveDir = uri.toString()
                 dir = uri.toString()
             } catch (e: Exception) {
-                Hub.toast("无法获得该文件夹的写入权限，请换一个（可新建子文件夹）")
+                Hub.report("无法使用该文件夹", e, "系统没有授予写入权限。请换一个文件夹（可以先在里面新建一个子文件夹），不要直接选存储根目录或“下载”文件夹本身")
             }
         }
     }
@@ -317,7 +317,7 @@ fun SettingsContent() {
         try {
             val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
             "${pi.versionName}（${pi.longVersionCode}）"
-        } catch (e: Exception) { "" }
+        } catch (e: Exception) { Hub.log("读取版本号", e); "（读取失败）" }
     }
 
     Text("当前版本：$ver", fontSize = 13.sp, color = Gray)
@@ -333,6 +333,16 @@ fun SettingsContent() {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { treePicker.launch(null) }) { Text("选择文件夹") }
                 if (dir != null) OutlinedButton(onClick = { Store.saveDir = null; dir = null }) { Text("恢复默认") }
+            }
+        }
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("错误记录", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。", fontSize = 12.sp, color = Gray)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }) { Text("查看") }
+                OutlinedButton(onClick = { Hub.clearErrorLog(); Hub.toast("已清空") }) { Text("清空") }
             }
         }
     }
