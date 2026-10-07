@@ -135,10 +135,6 @@ object Hub {
         Handler(Looper.getMainLooper()).post { Toast.makeText(app, s, Toast.LENGTH_SHORT).show() }
     }
 
-    fun toastLong(s: String) {
-        Handler(Looper.getMainLooper()).post { Toast.makeText(app, s, Toast.LENGTH_LONG).show() }
-    }
-
     fun touch() { lastActivity = now() }
 
     private fun persistSoon() {
