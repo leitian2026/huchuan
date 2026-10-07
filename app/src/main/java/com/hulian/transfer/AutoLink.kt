@@ -34,7 +34,8 @@ import org.json.JSONObject
 object LocationSwitch {
     fun isOn(ctx: Context): Boolean = try {
         LocationManagerCompat.isLocationEnabled(ctx.getSystemService(LocationManager::class.java))
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Hub.log("AutoLink", e)
         false
     }
 
@@ -51,7 +52,8 @@ object LocationSwitch {
                 if (on) Settings.Secure.LOCATION_MODE_HIGH_ACCURACY else Settings.Secure.LOCATION_MODE_OFF
             )
             isOn(ctx) == on
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Hub.log("AutoLink", e)
             false
         }
     }
@@ -59,7 +61,7 @@ object LocationSwitch {
     fun openSettings(ctx: Context) {
         try {
             ctx.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("AutoLink", e) }
     }
 }
 
@@ -95,6 +97,7 @@ object DirectGroup {
     private fun reasonText(r: Int) = when (r) {
         WifiP2pManager.P2P_UNSUPPORTED -> "本机不支持 Wi-Fi Direct"
         WifiP2pManager.BUSY -> "Wi-Fi Direct 正忙（可能本机正连着 Wi-Fi 且芯片不能同时用，或有别的 Wi-Fi Direct 连接）"
+        WifiP2pManager.ERROR -> "Wi-Fi Direct 内部错误（代码 0）：请关闭再打开 Wi-Fi 后重试"
         else -> "创建热点失败（代码 $r）"
     }
 
@@ -175,7 +178,7 @@ object DirectGroup {
         if (m == null || c == null) { up.value = false; return }
         try {
             m.requestGroupInfo(c) { g -> if (g == null) up.value = false }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("AutoLink", e) }
     }
 
     /**
@@ -207,10 +210,10 @@ object DirectGroup {
                                 h.postDelayed({ if (!up.value && !starting) removeWithRetry(m, c, left - 1) }, 1000)
                             }
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) { Hub.log("AutoLink", e) }
                 }
             })
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("AutoLink", e) }
     }
 
     /**
@@ -230,7 +233,7 @@ object DirectGroup {
                     removeWithRetry(m, c, 3)
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("AutoLink", e) }
     }
 }
 
@@ -395,12 +398,12 @@ object AutoLink {
             }
             ContextCompat.registerReceiver(app, receiver, f, ContextCompat.RECEIVER_NOT_EXPORTED)
             registered = true
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("AutoLink", e) }
     }
 
     private fun unregisterReceiver() {
         if (!registered) return
-        try { appCtx?.unregisterReceiver(receiver) } catch (_: Exception) {}
+        try { appCtx?.unregisterReceiver(receiver) } catch (e: Exception) { Hub.log("AutoLink", e) }
         registered = false
     }
 
@@ -436,11 +439,11 @@ object AutoLink {
         st(LinkKind.WORK, "正在准备连接…")
         registerReceiver(app)
         if (keeper?.isActive != true) {
-            try { app.startService(Intent(app, ExitWatcher::class.java)) } catch (_: Exception) {}
+            try { app.startService(Intent(app, ExitWatcher::class.java)) } catch (e: Exception) { Hub.log("AutoLink", e) }
             keeper = Hub.scope.launch {
                 for (k in kicks) {
                     if (Hub.appVisible && !paused && target != null) {
-                        try { step(app) } catch (_: Exception) {}
+                        try { step(app) } catch (e: Exception) { Hub.log("AutoLink", e) }
                     }
                 }
             }
@@ -500,7 +503,8 @@ object AutoLink {
         val ssid = LinkCred.of(p.fp).ssid
         return try {
             wm.scanResults.any { nowUs - it.timestamp < 20_000_000L && it.SSID == ssid }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Hub.log("AutoLink", e)
             false
         }
     }
@@ -510,7 +514,7 @@ object AutoLink {
     private fun requestScan(wm: WifiManager) {
         scanReqAt = now()
         scanDoneAt = 0L
-        try { wm.startScan() } catch (_: Exception) {}
+        try { wm.startScan() } catch (e: Exception) { Hub.log("AutoLink", e) }
         // 扫描结果广播一般很快就到；万一被系统限流没来，8 秒后也用现有结果继续
         scanTimer?.cancel()
         scanTimer = Hub.scope.launch {
