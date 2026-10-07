@@ -93,6 +93,7 @@ object Store {
             )
         }
     } catch (e: Exception) {
+        badFile(msgFile, e, "聊天记录")
         emptyList()
     }
 
@@ -120,12 +121,25 @@ object Store {
             )
         }.associateBy { it.id }
     } catch (e: Exception) {
+        badFile(peerFile, e, "已配对设备列表")
         emptyMap()
+    }
+
+    /** 文件存在但读不出来：不能悄悄当成“空”（用户会以为数据没了）。先备份坏文件，再告诉用户原因 */
+    private fun badFile(f: File, e: Exception, what: String) {
+        if (!f.exists()) return   // 第一次运行，本来就没有
+        val bak = File(f.parentFile, f.name + ".bad")
+        val saved = try { f.copyTo(bak, overwrite = true); true } catch (_: Exception) { false }
+        Hub.reportOnce(
+            "load-" + f.name, what + "读取失败",
+            "文件已损坏或格式不对，本次启动按“没有数据”处理" + (if (saved) "，原文件已备份为 ${bak.name}" else "") + "。如果是已配对设备列表，需要重新扫码配对",
+            techDetail(e)
+        )
     }
 
     private fun writeAtomic(f: File, text: String) {
         val tmp = File(f.parentFile, f.name + ".tmp")
         tmp.writeText(text)
-        tmp.renameTo(f)
+        if (!tmp.renameTo(f)) throw java.io.IOException("无法替换文件 ${f.name}（重命名失败，可能存储空间不足或存储不可写）")
     }
 }
