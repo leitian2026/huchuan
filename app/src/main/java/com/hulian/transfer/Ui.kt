@@ -77,9 +77,9 @@ sealed interface Screen {
     data object MyQr : Screen
 }
 
-private val ScreenStackSaver = listSaver<MutableState<List<Screen>>, String>(
+private val ScreenStackSaver = listSaver<List<Screen>, String>(
     save = { st ->
-        st.value.map {
+        st.map {
             when (it) {
                 is Screen.Home -> "H"
                 is Screen.Connect -> "C"
@@ -90,7 +90,7 @@ private val ScreenStackSaver = listSaver<MutableState<List<Screen>>, String>(
         }
     },
     restore = { l ->
-        mutableStateOf(l.map {
+        l.map {
             when {
                 it == "C" -> Screen.Connect
                 it == "Q" -> Screen.MyQr
@@ -98,7 +98,7 @@ private val ScreenStackSaver = listSaver<MutableState<List<Screen>>, String>(
                 it.startsWith("P:") -> Screen.Picker(it.substring(2))
                 else -> Screen.Home
             }
-        }.ifEmpty { listOf(Screen.Home) })
+        }.ifEmpty { listOf(Screen.Home) }
     }
 )
 
