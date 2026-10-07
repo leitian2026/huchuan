@@ -254,6 +254,8 @@ object AutoLink {
     @Volatile private var failures = 0
     @Volatile private var scanReqAt = 0L
     @Volatile private var scanDoneAt = 0L
+    /** 最近一次 startScan 被系统限流（安卓 12 前台约 2 分钟 4 次）：拿不到新结果，不能靠扫描判断对方在不在 */
+    @Volatile private var scanThrottled = false
     private var locAsked = false
     private val shown = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -261,6 +263,7 @@ object AutoLink {
         override fun onReceive(c: Context?, i: Intent?) {
             if (i?.action == WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
                 scanDoneAt = now()
+                scanThrottled = false
                 scanTimer?.cancel()
                 kick(reset = false)
             } else {
@@ -468,11 +471,13 @@ object AutoLink {
     private fun requestScan(wm: WifiManager) {
         scanReqAt = now()
         scanDoneAt = 0L
-        try { wm.startScan() } catch (_: Exception) {}
-        // 扫描结果广播一般很快就到；万一被系统限流没来，8 秒后也用现有结果继续
+        scanThrottled = false
+        val ok = try { wm.startScan() } catch (_: Exception) { false }
+        if (!ok) scanThrottled = true
+        // 扫描结果广播一般 1~3 秒就到；万一没来，4 秒后也用现有结果继续
         scanTimer?.cancel()
         scanTimer = Hub.scope.launch {
-            delay(8000)
+            delay(4000)
             scanDoneAt = now()
             kicks.trySend(Unit)
         }
@@ -586,13 +591,13 @@ object AutoLink {
     }
 
     /**
-     * 接收方等对方热点出现：前 3 次每 4 秒、之后每 30 秒再扫一次（一次性延时，不是常驻轮询；
+     * 接收方等对方热点出现：第一次 15 秒、之后每 30 秒再扫一次（一次性延时，不是常驻轮询；
      * 系统对前台扫描有次数限制，所以后面放长）。系统自己扫到结果的广播也会立刻触发检查
      */
     private fun armWait() {
         if (waitJob?.isActive == true) return
         waitJob = Hub.scope.launch {
-            delay(if (waitN++ < 3) 4_000L else 30_000L)
+            delay(if (waitN++ < 1) 15_000L else 30_000L)
             waitJob = null
             if (target != null && Hub.appVisible && !HotspotJoin.active.value) {
                 scanReqAt = 0L
@@ -609,13 +614,22 @@ object AutoLink {
             if (scanReqAt == 0L) {
                 st(LinkKind.WORK, "正在查找 ${t.name} 的热点…")
                 requestScan(wm)
-                return
             }
-            if (scanDoneAt < scanReqAt) return
-            if (!hasSignal(wm, t)) {
-                st(LinkKind.WORK, "等待 ${t.name} 打开和本机的对话…（对方的热点一出现就自动连接；点这里可直接尝试连接）", "force")
-                armWait()
-                return
+            // 被系统限流、拿不到新扫描结果：第一次（还没进入等待）直接去连，对方热点已开时最快；
+            // 已经在等待中就继续等，靠系统自己扫到结果的广播触发
+            if (scanThrottled) {
+                if (waitN > 0) {
+                    st(LinkKind.WORK, "等待 ${t.name} 打开和本机的对话…（对方的热点一出现就自动连接；点这里可直接尝试连接）", "force")
+                    armWait()
+                    return
+                }
+            } else {
+                if (scanDoneAt < scanReqAt) return
+                if (!hasSignal(wm, t)) {
+                    st(LinkKind.WORK, "等待 ${t.name} 打开和本机的对话…（对方的热点一出现就自动连接；点这里可直接尝试连接）", "force")
+                    armWait()
+                    return
+                }
             }
         }
         forceJoin = false
