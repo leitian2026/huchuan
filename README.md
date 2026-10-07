@@ -4,6 +4,8 @@ Android 局域网互传：文字、文件、已安装应用（仅 apk，不含�
 
 - 同一 Wi-Fi：mDNS 自动发现，免扫码；找不到时可扫二维码
 - 无 Wi-Fi：一方“创建热点”显示二维码，另一方扫码连接；首次配对时谁开二维码，以后谁就建热点，扫码的一方自动去连，不再弹窗选择
+- 自动打开开关：Wi-Fi 和系统“定位”关着时，自动连接 / 扫码配对会自动打开（需要 root；定位也可以在电脑上执行一次 `adb shell pm grant com.hulian.transfer android.permission.WRITE_SECURE_SETTINGS` 代替 root）。只还原本 app 自己打开的：离开对话框、退出 app、扫码没配成功时关回去，本来就开着的不动
+- 没有 root（或拒绝了授权）：首页“消息”“设备”标题旁显示“没有root”，点一下重新检测；此时开关仍需手动打开
 - 接收位置：设置里选一次文件夹，之后记住；未选时存到 下载/互传
 - 构建：手动触发。GitHub 仓库 → Actions →「Build Debug APK」→ Run workflow，完成后在 Artifacts 里下载 APK（推送代码不会自动构建）
 - 仓库里带了固定的 debug 签名（app/debug.keystore），每次构建签名一致，可直接覆盖安装
