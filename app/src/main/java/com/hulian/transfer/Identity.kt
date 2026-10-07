@@ -24,7 +24,15 @@ object Identity {
             tls = Tls.loadIdentity(Secure.unb64(k), Secure.unb64(certFile.readText()))
             return
         } catch (e: Exception) {
-            // 第一次运行，或身份文件不完整/不配套：重新生成
+            // 第一次运行，或身份文件不完整/不配套：重新生成。但如果文件原本存在，说明身份坏了，
+            // 重新生成后之前配对过的设备都认不出本机，必须告诉用户
+            if (keyFile.exists() || certFile.exists()) {
+                Hub.reportOnce(
+                    "identity", "本机身份密钥读取失败",
+                    "已经重新生成了新的身份。之前配对过的设备不再认得本机，需要两边都删除对方后重新扫码配对",
+                    techDetail(e)
+                )
+            }
         }
         val id = Tls.generateIdentity("hulian-" + Store.deviceId)
         keyFile.writeText(KeyVault.encrypt(Secure.b64(id.keyPkcs8())))
