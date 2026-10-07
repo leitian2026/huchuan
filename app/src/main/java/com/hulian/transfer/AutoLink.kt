@@ -489,7 +489,8 @@ object AutoLink {
             return
         }
         // 对方已经通过同一个 Wi-Fi 在线（原来的局域网方式能用）：不用选，也不用建热点
-        if (t.online && !DirectGroup.up.value) {
+        // 光看“在线”标记不够：上一次热点连接留下的标记要过十几秒才会过期，这时对方地址已经不在本机的局域网里了
+        if (t.online && !DirectGroup.up.value && Net.onLan(t.host)) {
             st(LinkKind.OK, "已连接：${t.name}（同一 Wi-Fi）")
             return
         }
