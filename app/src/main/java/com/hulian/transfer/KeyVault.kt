@@ -39,6 +39,7 @@ object KeyVault {
             val ct = c.doFinal(plain.toByteArray(Charsets.UTF_8))
             PREFIX + Secure.b64(c.iv) + ":" + Secure.b64(ct)
         } catch (e: Exception) {
+            Hub.reportOnce("keyvault-enc", "私钥加密保存失败", "系统的密钥库不可用，私钥将以未加密的形式保存在本机", techDetail(e))
             plain
         }
     }
@@ -53,6 +54,7 @@ object KeyVault {
             c.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Secure.unb64(p[0])))
             String(c.doFinal(Secure.unb64(p[1])), Charsets.UTF_8)
         } catch (e: Exception) {
+            Hub.log("私钥解密", e)
             ""
         }
     }
