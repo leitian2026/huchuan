@@ -14,7 +14,11 @@ import java.io.InputStream
 /** 全局状态中心：设备列表、聊天消息、发送逻辑、在线检测 */
 object Hub {
     lateinit var app: Context
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** 后台协程里任何没被处理的异常，都会在这里报告（以前会静悄悄消失） */
+    val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO +
+            CoroutineExceptionHandler { _, e -> if (e !is CancellationException) report("程序内部出错", e) }
+    )
 
     private val _msgs = MutableStateFlow<List<Msg>>(emptyList())
     val msgs = _msgs.asStateFlow()
@@ -61,6 +65,72 @@ object Hub {
         _peers.value = Store.loadPeers()
     }
 
+    /** 要弹出的错误窗口：标题 + 原因 + 详细信息（可选中、可复制，不会像 Toast 那样被截断） */
+    class ErrorInfo(val title: String, val reason: String, val detail: String = "")
+
+    val errorDialog = MutableStateFlow<ErrorInfo?>(null)
+    private val pendingErrors = ArrayDeque<ErrorInfo>()
+    private val onceKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 弹出错误窗口；已经有一个窗口开着时排队，一个个显示，不会互相覆盖。同时写入错误记录 */
+    fun fail(title: String, reason: String, detail: String = "") {
+        logLine("$title：$reason" + if (detail.isNotEmpty()) "  [" + detail.replace("\n", " | ") + "]" else "")
+        synchronized(pendingErrors) {
+            val cur = errorDialog.value
+            if (cur == null) {
+                errorDialog.value = ErrorInfo(title, reason, detail)
+            } else if (!(cur.title == title && cur.reason == reason) &&
+                pendingErrors.none { it.title == title && it.reason == reason }
+            ) {
+                pendingErrors.addLast(ErrorInfo(title, reason, detail))
+            }
+        }
+    }
+
+    /** 关闭当前错误窗口，有排队的就接着显示下一个 */
+    fun dismissError() {
+        synchronized(pendingErrors) { errorDialog.value = pendingErrors.removeFirstOrNull() }
+    }
+
+    /** 由异常生成错误窗口：中文原因 + 技术详情 */
+    fun report(title: String, e: Throwable, extra: String = "") {
+        fail(title, friendlyError(e), (extra + "\n" + techDetail(e)).trim())
+    }
+
+    /** 同一个问题本次运行只弹一次（比如每次网络变化都会重试的后台功能），之后只记入错误记录 */
+    fun reportOnce(key: String, title: String, reason: String, detail: String = "") {
+        if (onceKeys.add(key)) fail(title, reason, detail) else logLine("$title：$reason")
+    }
+
+    /** 只记录、不打扰用户的次要错误（比如某个可有可无的后台动作失败）：在设置里的“错误记录”可以看到 */
+    fun log(where: String, e: Throwable) {
+        logLine("[$where] " + friendlyError(e) + "  (" + techDetail(e).replace("\n", " | ") + ")")
+    }
+
+    private fun logLine(s: String) {
+        try {
+            if (!::app.isInitialized) return
+            val t = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            val f = java.io.File(app.filesDir, "error.log")
+            synchronized(this) {
+                if (f.length() > 200_000) f.delete()
+                f.appendText("$t $s\n")
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun errorLogText(): String = try {
+        val f = java.io.File(app.filesDir, "error.log")
+        if (f.exists()) f.readLines().takeLast(200).joinToString("\n").ifEmpty { "（没有错误记录）" } else "（没有错误记录）"
+    } catch (e: Exception) {
+        "读取错误记录失败：" + friendlyError(e)
+    }
+
+    fun clearErrorLog() {
+        try { java.io.File(app.filesDir, "error.log").delete() } catch (_: Exception) {}
+    }
+
     fun toast(s: String) {
         Handler(Looper.getMainLooper()).post { Toast.makeText(app, s, Toast.LENGTH_SHORT).show() }
     }
@@ -75,8 +145,13 @@ object Hub {
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(400)
-            Store.saveMsgs(_msgs.value)
-            Store.savePeers(_peers.value)
+            try {
+                Store.saveMsgs(_msgs.value)
+                Store.savePeers(_peers.value)
+            } catch (e: Exception) {
+                // 存不下去意味着重启后聊天记录 / 已配对设备会丢，必须让用户知道
+                reportOnce("save", "聊天记录 / 设备列表保存失败", friendlyError(e), techDetail(e))
+            }
         }
     }
 
@@ -180,7 +255,7 @@ object Hub {
     /** 扫码配对：用二维码里的一次性口令与对方握手；成功后双方互相记住并共享密钥 */
     suspend fun pair(id: String, name: String, host: String, port: Int, token: String, hostFp: String): Boolean {
         if (id == Store.deviceId) {
-            toast("不能和自己配对")
+            fail("配对失败", "不能和自己配对：扫到的是本机自己的二维码")
             return false
         }
         return try {
@@ -192,7 +267,7 @@ object Hub {
             addPaired(id, r.name.ifEmpty { name }, host, port, r.fp, iHost = false)  // 扫码的一方：以后连对方的热点
             true
         } catch (e: Exception) {
-            toast("配对失败：" + friendlyError(e))
+            fail("配对失败", friendlyError(e), "对方地址：$host:$port\n" + techDetail(e))
             false
         } finally {
             if (pairPrompt.value?.isHost == false) pairPrompt.value = null
