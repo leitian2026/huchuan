@@ -35,6 +35,12 @@ class MainActivity : ComponentActivity() {
         if (!Hub.picking) AutoLink.onForeground(this)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 选文件的结果回调比 onStart 还早，所以标志要等界面真正回到前台（onResume）才清
+        Hub.picking = false
+    }
+
     override fun onStop() {
         Hub.appVisible = false
         if (!Hub.picking) AutoLink.onBackground()
@@ -58,6 +64,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Hub.recreating = false
         AutoLink.resume()
+        // 检测本机有没有 root（有的话第一次会弹 root 授权窗口）：没有就在首页标题旁提示，并且 Wi-Fi / 定位没法自动打开
+        Root.refresh()
         // 上次没来得及关的群组（app 被系统杀掉 / 崩溃）：启动时拆掉
         if (savedInstanceState == null) DirectGroup.cleanupStale(this)
         setContent { HulianTheme { AppRoot() } }
