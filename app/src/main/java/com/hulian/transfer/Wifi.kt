@@ -212,7 +212,7 @@ object HotspotJoin {
         }
         callback = cb
         try {
-            m.requestNetwork(req, cb, 15000)   // 15 秒内没连上就放弃（含系统弹窗等用户点“连接”的时间）
+            m.requestNetwork(req, cb, 30000)   // 30 秒内没连上就放弃（含系统弹窗等用户点“连接”的时间）
         } catch (e: Exception) {
             // 比如系统拒绝了权限：不再被当成"二维码无效"，直接改为手动连接
             callback = null
