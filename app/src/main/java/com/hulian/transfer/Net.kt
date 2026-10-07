@@ -82,6 +82,25 @@ object Net {
     @Volatile
     private var pairSock: Socket? = null
 
+    /**
+     * 刚连上对方热点时路由 / DHCP 往往还没完全就绪，第一次连接容易超时：连不上（还没发出任何数据）就隔 1.2 秒再试，最多 3 次。
+     * 只重试"连接建立"这一步；证书不符（SSLException）立刻失败，不重试
+     */
+    private fun connectWithRetry(host: String, port: Int, hostFp: String): SSLSocket {
+        var last: IOException? = null
+        for (i in 0 until 3) {
+            try {
+                return Tls.connect(InetSocketAddress(InetAddress.getByName(host), port), 6000, 10000, Identity.tls, hostFp)
+            } catch (e: SSLException) {
+                throw e
+            } catch (e: IOException) {
+                last = e
+                if (i < 2) try { Thread.sleep(1200) } catch (_: InterruptedException) { break }
+            }
+        }
+        throw last ?: IOException("连接失败")
+    }
+
     /** 用户在"等待对方确认"弹窗里点了取消：直接断开连接 */
     fun cancelPair() {
         try { pairSock?.close() } catch (_: Exception) {}
@@ -95,7 +114,7 @@ object Net {
     fun pair(peerId: String, host: String, port: Int, token: String, hostFp: String, onCode: (String) -> Unit): PairResult {
         val tok = Secure.unb64(token)
         val s = try {
-            Tls.connect(InetSocketAddress(InetAddress.getByName(host), port), 6000, 10000, Identity.tls, hostFp)
+            connectWithRetry(host, port, hostFp)
         } catch (e: SSLException) {
             throw IOException("连上的设备和二维码里的设备不一致，请重新扫码", e)
         }
