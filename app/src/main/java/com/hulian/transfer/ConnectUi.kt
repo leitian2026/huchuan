@@ -1,7 +1,9 @@
 package com.hulian.transfer
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
@@ -105,18 +107,43 @@ fun MyQrScreen(onBack: () -> Unit) {
     val hsErr by HotspotHost.error.collectAsState()
     var lan by remember { mutableStateOf<String?>(null) }
     val startHello = remember { Hub.helloCount }
+    var p2pMode by remember { mutableStateOf(false) }
+    var p2pQr by remember { mutableStateOf<String?>(null) }
+    val p2pUp by DirectGroup.up.collectAsState()
+    // 没有 Wi-Fi：优先建 Wi-Fi Direct 群组（扫码方自动加入，没有系统弹窗、不用手动连）；建不出来才退回本地热点
+    fun startNoWifi() {
+        HotspotHost.error.value = null
+        p2pQr = null
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        if (!wm.isWifiEnabled) {
+            HotspotHost.error.value = "请先打开 Wi-Fi 开关（不需要连接任何网络），再点“重试”"
+            return
+        }
+        p2pMode = true
+        DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { _ ->
+            p2pMode = false
+            HotspotHost.start(ctx)
+        }
+    }
+    LaunchedEffect(p2pUp, p2pMode) {
+        if (p2pMode && p2pUp && p2pQr == null) {
+            p2pQr = JSONObject().put("t", "hl").put("id", Store.deviceId).put("name", Store.deviceName)
+                .put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).put("p2p", true).toString()
+        }
+    }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
-        if (hotspotCoreGranted(ctx)) HotspotHost.start(ctx)
+        if (hotspotCoreGranted(ctx)) startNoWifi()
         else HotspotHost.error.value = "没有授予创建热点所需的权限：" + hotspotPermName() +
             "。请点下方\u201c去设置\u201d授权；也可以不授权，自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
     }
     fun lanPayload(ip: String): String = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-        .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).toString()
+        .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp)
+        .put("p2p", hotspotCoreGranted(ctx)).toString()   // p2p：本机同时建 Wi-Fi Direct 群组，对方不在同一个 Wi-Fi 时可自动加入
     // 没有 Wi-Fi 时：先补齐权限，再创建临时热点
     fun startHotspot() {
         HotspotHost.error.value = null
         val miss = hotspotPermsMissing(ctx)
-        if (miss.isEmpty()) HotspotHost.start(ctx) else permLauncher.launch(miss.toTypedArray())
+        if (miss.isEmpty()) startNoWifi() else permLauncher.launch(miss.toTypedArray())
     }
     LaunchedEffect(Unit) {
         // 先清掉自动连接留下的群组 / 连接，等系统拆完再开始（交换方向配对时最容易受上一次连接影响）
@@ -131,6 +158,10 @@ fun MyQrScreen(onBack: () -> Unit) {
         } else if (ip != null) {
             // 已连 Wi-Fi：直接显示局域网二维码
             lan = lanPayload(ip)
+            // 同时建好 Wi-Fi Direct 群组（固定名称密码，对方由二维码里的指纹算出）：对方没连同一个 Wi-Fi 时扫码后自动加入
+            if (hotspotCoreGranted(ctx) && !DirectGroup.up.value && !DirectGroup.starting) {
+                DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { }
+            }
         } else {
             startHotspot()
         }
@@ -148,10 +179,10 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
     DisposableEffect(Unit) {
-        onDispose { if (Hub.helloCount == startHello) HotspotHost.stop() }
+        onDispose { if (Hub.helloCount == startHello) { HotspotHost.stop(); DirectGroup.stop() } }
     }
 
-    val payload = lan ?: hsPayload
+    val payload = lan ?: hsPayload ?: p2pQr
     Column(Modifier.fillMaxSize()) {
         TopBar("我的二维码", onBack)
         Column(
@@ -169,6 +200,14 @@ fun MyQrScreen(onBack: () -> Unit) {
                     else "让对方打开互传，点“扫一扫”扫这个码\n（已创建临时热点，不耗流量；对方会暂时离开原来的 Wi-Fi）",
                     color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
                 )
+                if (lan != null) {
+                    OutlinedButton(onClick = { DirectGroup.stop(); lan = null; startHotspot() }) { Text("对方没连 Wi-Fi？改用热点") }
+                    Text(
+                        "对方手机必须和本机在同一个 Wi-Fi 里才能扫这个码。对方没有连 Wi-Fi 时，点上面的按钮；" +
+                            "如果提示创建热点失败，先关掉本机的 Wi-Fi 再重新打开本页",
+                        color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center
+                    )
+                }
                 Text("对方扫码后，两台手机会显示同一个验证码，核对一致再点\u201c同意\u201d。二维码 15 分钟内有效，只能用一次", color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
             } else if (hsErr == null) {
                 CircularProgressIndicator()
