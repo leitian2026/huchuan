@@ -1,14 +1,9 @@
 package com.hulian.transfer
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -17,53 +12,21 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import androidx.documentfile.provider.DocumentFile
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 /** 扫码入口：返回一个“点击即启动扫码”的函数，扫到的结果自动处理 */
 @Composable
@@ -131,8 +94,7 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     LaunchedEffect(p2pUp, p2pMode) {
         if (p2pMode && p2pUp && p2pQr == null) {
-            p2pQr = JSONObject().put("t", "hl").put("id", Store.deviceId).put("name", Store.deviceName)
-                .put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp).put("p2p", true).toString()
+            p2pQr = Pairing.qrBase().put("p2p", true).toString()
         }
     }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
@@ -140,9 +102,8 @@ fun MyQrScreen(onBack: () -> Unit) {
         else HotspotHost.error.value = "没有授予创建热点所需的权限：" + hotspotPermName() +
             "。请点下方\u201c去设置\u201d授权；也可以不授权，自己在系统里打开\u201c个人热点\u201d，本页会自动显示二维码"
     }
-    fun lanPayload(ip: String): String = JSONObject().put("t", "hl").put("ip", ip).put("id", Store.deviceId)
-        .put("name", Store.deviceName).put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp)
-        .put("p2p", hotspotCoreGranted(ctx)).toString()   // p2p：本机同时建 Wi-Fi Direct 群组，对方不在同一个 Wi-Fi 时可自动加入
+    // p2p：本机同时建 Wi-Fi Direct 群组，对方不在同一个 Wi-Fi 时可自动加入
+    fun lanPayload(ip: String): String = Pairing.qrBase().put("ip", ip).put("p2p", hotspotCoreGranted(ctx)).toString()
     // 没有 Wi-Fi 时：先补齐权限，再创建临时热点
     fun startHotspot() {
         HotspotHost.error.value = null
