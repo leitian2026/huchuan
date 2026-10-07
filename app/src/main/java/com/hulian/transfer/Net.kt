@@ -179,6 +179,41 @@ object Net {
         null
     }
 
+    /**
+     * 对方的地址是不是在本机当前真正的局域网里（Wi-Fi / 本机开的热点网卡，不含 Wi-Fi Direct 的 p2p 网卡）。
+     * 用来判断“同一 Wi-Fi”：对方的在线标记可能是上一次连接留下的、还没来得及过期，不能只看标记
+     */
+    fun onLan(host: String): Boolean = try {
+        val target = java.net.InetAddress.getByName(host).address
+        target.size == 4 && Collections.list(NetworkInterface.getNetworkInterfaces())
+            .filter {
+                it.isUp && !it.isLoopback &&
+                    (it.name.startsWith("wlan") || it.name.startsWith("swlan") || it.name.startsWith("softap") || it.name.startsWith("ap"))
+            }
+            .any { ni ->
+                ni.interfaceAddresses.any { ia ->
+                    val a = ia.address
+                    if (a !is Inet4Address) {
+                        false
+                    } else {
+                        val ab = a.address
+                        val bits = ia.networkPrefixLength.toInt()
+                        var same = true
+                        for (i in 0 until bits) {
+                            val mask = 0x80 shr (i % 8)
+                            if ((ab[i / 8].toInt() and mask) != (target[i / 8].toInt() and mask)) {
+                                same = false
+                                break
+                            }
+                        }
+                        same
+                    }
+                }
+            }
+    } catch (e: Exception) {
+        false
+    }
+
     /** 系统里是否已经有热点在运行（手动开的 / 别的软件开的 / 本 app 的本地热点），看热点网卡是否有 IPv4 */
     fun apActive(): Boolean = try {
         Collections.list(NetworkInterface.getNetworkInterfaces()).any { n ->
