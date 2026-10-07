@@ -36,11 +36,6 @@ object Store {
         get() = prefs.getString("dir", null)
         set(v) { prefs.edit().putString("dir", v).apply() }
 
-    /** 首页当前显示的聊天对象 */
-    var currentPeer: String?
-        get() = prefs.getString("cur", null)
-        set(v) { prefs.edit().putString("cur", v).apply() }
-
     /** 是否已经做过首次权限说明/申请 */
     var permsAsked: Boolean
         get() = prefs.getBoolean("permsAsked", false)
