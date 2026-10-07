@@ -119,6 +119,8 @@ fun MyQrScreen(onBack: () -> Unit) {
         if (miss.isEmpty()) HotspotHost.start(ctx) else permLauncher.launch(miss.toTypedArray())
     }
     LaunchedEffect(Unit) {
+        // 先清掉自动连接留下的群组 / 连接，等系统拆完再开始（交换方向配对时最容易受上一次连接影响）
+        if (AutoLink.releaseForPairing()) delay(1500)
         val ip = Net.wifiIp()
         if (HotspotHost.isUp()) {
             // 本 app 的热点已经开着（自动打开的）：不重开，只换新的一次性口令。
