@@ -40,7 +40,7 @@ data class LinkStatus(val kind: LinkKind, val text: String, val action: String =
  * - 热点名称和密码由主机自己的证书算出，所有已配对设备都能算出来，不用扫码、不弹窗
  * - 完全由事件触发，没有定时轮询（省电）：点开对话框、Wi-Fi / 定位开关变化、扫描结果、授权完成、设备上线下线、连接断开……才检查。
  *   监听只在 app 在前台时注册。只有“没连上 / 创建失败”时才每 2 秒重试一次，最多 12 次
- * - 只关本 app 自己建的群组、自己改开的定位；手动开的 / 别的软件开的一律不碰
+ * - 只关本 app 自己建的群组、自己改开的 Wi-Fi / 定位；手动开的 / 别的软件开的一律不碰
  */
 object AutoLink {
     /** 需要用户去系统里手动打开定位（本 app 没有权限自己开） */
@@ -97,6 +97,10 @@ object AutoLink {
     private val kicks = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var paused = false
     @Volatile private var failures = 0
+    @Volatile private var wifiTried = false      // 这次对话框里已经试过自动打开 Wi-Fi，失败了不反复弹 root 授权
+    @Volatile private var wifiOpening = false
+    @Volatile private var locTried = false       // 同上：定位这次对话框里只自动打开一次
+    @Volatile private var locOpening = false
     @Volatile private var scanReqAt = 0L
     @Volatile private var scanDoneAt = 0L
     private var locAsked = false
@@ -267,19 +271,35 @@ object AutoLink {
         }
     }
 
-    /** 定位没开时：能自己开就开；Android 12 及以下扫描和建热点都离不开定位，只能引导用户去开 */
-    private fun ensureLocation(app: Context): Boolean {
-        if (LocationSwitch.isOn(app)) return true
-        Store.ownLocation = false
-        if (LocationSwitch.set(app, true)) {
-            Store.ownLocation = true
-            return true
+    private enum class LocState { OK, OPENING, MANUAL }
+
+    /**
+     * 定位没开时：能自己开就开（root 或 adb 授予的 WRITE_SECURE_SETTINGS），和 Wi-Fi 一样每次对话框只试一次，失败了不反复弹 root 授权。
+     * Android 12 及以下扫描和建热点都离不开定位，自动打开失败只能引导用户去开
+     */
+    private fun ensureLocation(app: Context): LocState {
+        if (LocationSwitch.isOn(app)) return LocState.OK
+        if (locOpening) return LocState.OPENING   // 正在打开：等系统的定位开关广播再继续，不轮询
+        if (!locTried) {
+            locTried = true
+            locOpening = true
+            Hub.scope.launch {
+                try {
+                    AutoOpen.location(app)   // 本 app 打开的会记到 Store.ownLocation，退出对话框时还原
+                } catch (e: Exception) {
+                    Hub.log("AutoLink", e)
+                } finally {
+                    locOpening = false
+                }
+                kick(reset = false)
+            }
+            return LocState.OPENING
         }
         if (Build.VERSION.SDK_INT < 33) {
             askLocation()
-            return false
+            return LocState.MANUAL
         }
-        return true   // Android 13+：有的系统已不要求定位，先直接试，失败了再提示
+        return LocState.OK   // Android 13+：有的系统已不要求定位，先直接试，失败了再提示
     }
 
     @SuppressLint("MissingPermission")
@@ -353,12 +373,36 @@ object AutoLink {
         }
         val wm = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
         if (!wm.isWifiEnabled) {
-            st(LinkKind.WARN, "请打开 Wi-Fi 开关（不需要连接任何网络），打开后自动连接")
+            // 正在打开：等系统的 Wi-Fi 状态广播再继续，不轮询
+            if (wm.wifiState == WifiManager.WIFI_STATE_ENABLING || wifiOpening) {
+                st(LinkKind.WORK, "正在打开 Wi-Fi…")
+                return
+            }
+            if (!wifiTried) {
+                wifiTried = true
+                wifiOpening = true
+                st(LinkKind.WORK, "正在打开 Wi-Fi…")
+                Hub.scope.launch {
+                    val ok = WifiSwitch.set(true)
+                    wifiOpening = false
+                    if (ok) Store.ownWifi = true   // 本来是关的、这次由本 app 打开：退出对话框时要还原
+                    kick(reset = false)
+                }
+                return
+            }
+            st(LinkKind.WARN, "请打开 Wi-Fi 开关（不需要连接任何网络），打开后自动连接。自动打开失败：需要 root 授权")
             return
         }
-        if (!ensureLocation(app)) {
-            st(LinkKind.WARN, "需要打开系统的定位开关才能继续（点这里去设置）", "location")
-            return
+        when (ensureLocation(app)) {
+            LocState.OPENING -> {
+                st(LinkKind.WORK, "正在打开定位…")
+                return
+            }
+            LocState.MANUAL -> {
+                st(LinkKind.WARN, "需要打开系统的定位开关才能继续（点这里去设置）。自动打开失败：需要 root 授权", "location")
+                return
+            }
+            LocState.OK -> {}
         }
 
         // 选的是“接收信号”，但本机热点还开着（比如刚由建热点改成接收）：先关掉
@@ -478,9 +522,32 @@ object AutoLink {
         failures = 0
         locAsked = false
         needLocation.value = false
+        // 上面的群组已经先拆了；再还原本 app 打开的 Wi-Fi / 定位（本来就开着的、用户自己开的不动）
+        wifiTried = false
+        locTried = false
+        restoreSwitches()
+    }
+
+    /**
+     * 还原本 app 自己打开的 Wi-Fi 和定位开关：只关记录里“本 app 打开”的；本来就开着的、用户自己开的不动。
+     * 离开对话框 / 退出 app / 扫码配对没成功时调用。还原是异步的（要借 root），执行时如果又点开了对话框就不关
+     */
+    fun restoreSwitches() {
         if (Store.ownLocation) {
-            LocationSwitch.set(Hub.app, false)
             Store.ownLocation = false
+            Hub.scope.launch {
+                try {
+                    if (target == null && LocationSwitch.isOn(Hub.app)) LocationSwitch.setAny(Hub.app, false)
+                } catch (e: Exception) { Hub.log("AutoLink", e) }
+            }
+        }
+        if (Store.ownWifi) {
+            Store.ownWifi = false
+            Hub.scope.launch {
+                try {
+                    if (target == null && WifiSwitch.isOn(Hub.app)) WifiSwitch.set(false)
+                } catch (e: Exception) { Hub.log("AutoLink", e) }
+            }
         }
     }
 
