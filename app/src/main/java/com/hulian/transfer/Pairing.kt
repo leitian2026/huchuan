@@ -77,16 +77,17 @@ object Pairing {
     private fun handleNow(ctx: Context, text: String, onChat: (String) -> Unit) {
         val j = try { JSONObject(text) } catch (e: Exception) { null }
         if (j == null || j.optString("t") != "hl") {
-            Hub.toast("这不是互传的二维码")
+            Hub.fail("扫码失败", "这不是互传的二维码。请扫对方手机“我的二维码”页里的码", "二维码内容开头：" + text.take(40))
             return
         }
         val k = j.optString("k")
         val fp = j.optString("fp")
         if (k.isEmpty() || fp.isEmpty()) {
-            Hub.toast("这个二维码来自旧版本，请让对方更新互传后再扫")
+            Hub.fail("扫码失败", "这个二维码来自旧版本，请让对方更新互传后再扫", "缺少字段：" + (if (k.isEmpty()) "k " else "") + (if (fp.isEmpty()) "fp" else ""))
             return
         }
         // 先只解析：解析失败才说"二维码内容无效"，后面连接环节的问题不再被误报成这个
+        var parseErr: Exception? = null
         val q = try {
             val hot = j.has("ssid")
             Qr(
@@ -97,14 +98,15 @@ object Pairing {
                 j.optBoolean("p2p", false)
             )
         } catch (e: Exception) {
+            parseErr = e
             null
         }
         if (q == null) {
-            Hub.toast("二维码内容无效")
+            Hub.fail("扫码失败", "二维码内容无效，缺少必要信息，请让对方重新打开“我的二维码”页再扫", parseErr?.let { techDetail(it) } ?: "")
             return
         }
         if (q.ssid == null && q.ip == null && !q.p2p) {
-            Hub.toast("二维码内容无效")
+            Hub.fail("扫码失败", "二维码里没有任何连接方式（既没有 Wi-Fi 地址，也没有热点或 Wi-Fi Direct 信息），请让对方更新互传后重新生成二维码")
             return
         }
         if (q.ssid != null && q.pwd != null) {
@@ -115,8 +117,11 @@ object Pairing {
                 if (q.p2p) {
                     joinViaP2p(ctx, q, onChat)
                 } else {
-                    Hub.toastLong("你的手机没有连上对方所在的 Wi-Fi / 热点，所以配对不了。\n请先连上同一个 Wi-Fi（或对方的热点）再扫；对方也可以在“我的二维码”页点“改用热点”")
-                    HotspotJoin.openWifiSettings(ctx)
+                    Hub.fail(
+                        "配对失败",
+                        "你的手机没有连上对方所在的 Wi-Fi / 热点，所以连不到对方。请先连上同一个 Wi-Fi（或对方的热点）再扫；对方也可以在“我的二维码”页点“改用热点”，或更新互传到新版",
+                        "对方地址：${q.ip}:${q.port}\n对方二维码没有带 Wi-Fi Direct 标记（对方可能是旧版，或没有授予“附近设备”权限）"
+                    )
                 }
                 return
             }
@@ -134,39 +139,51 @@ object Pairing {
     /** 不在同一个网络：按二维码里的证书指纹算出对方固定的 Wi-Fi Direct 群组名和密码，自动加入后配对 */
     private fun joinViaP2p(ctx: Context, q: Qr, onChat: (String) -> Unit) {
         val app = ctx.applicationContext
-        val wm = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        if (!wm.isWifiEnabled) {
-            Hub.toastLong("请打开 Wi-Fi 开关（不需要连接任何网络），然后重新扫码")
-            HotspotJoin.openWifiSettings(ctx)
-            return
-        }
-        if (!hotspotCoreGranted(app)) {
-            Hub.toastLong("需要授予" + hotspotPermName() + "权限才能自动连接对方，请在系统设置里授权后重新扫码")
-            return
-        }
-        if (Build.VERSION.SDK_INT < 33 && !LocationSwitch.isOn(app)) {
-            // Android 12 及以下，Wi-Fi Direct 要求系统定位开关打开；有权限就自动开，没有就引导去开
-            if (!LocationSwitch.set(app, true)) {
-                Hub.toastLong("请先打开系统的“定位”开关（Android 12 及以下连接对方需要），然后重新扫码")
-                LocationSwitch.openSettings(ctx)
+        try {
+            val wm = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            if (!wm.isWifiEnabled) {
+                Hub.fail("无法自动连接对方", "本机的 Wi-Fi 开关是关着的。请打开 Wi-Fi 开关（不需要连接任何网络），然后重新扫码")
                 return
             }
-            Store.ownLocation = true
-        }
-        val cred = LinkCred.of(q.fp)
-        Hub.toast("正在自动连接对方，请稍等…")
-        Hub.scope.launch {
-            val done = CompletableDeferred<Boolean>()
-            P2pJoin.join(app, JoinParams(cred.ssid, cred.pwd, q.id, q.name, q.port, q.k, q.fp), done, pairing = true)
-            if (done.await()) {
-                withContext(Dispatchers.Main) { onChat(q.id) }
-            } else {
-                // 配对本身失败时 Hub.pair 已经弹过提示；这里只处理“连不上对方群组”
-                if (P2pJoin.lastError.isNotEmpty()) {
-                    Hub.toastLong("自动连接对方失败" + P2pJoin.lastError + "。请让对方保持“我的二维码”页面不要关，并打开 Wi-Fi 开关后重新扫码")
-                }
-                HotspotJoin.leave()
+            if (!hotspotCoreGranted(app)) {
+                Hub.fail("无法自动连接对方", "没有授予" + hotspotPermName() + "权限。请在系统设置里授权后重新扫码")
+                return
             }
+            if (Build.VERSION.SDK_INT < 33 && !LocationSwitch.isOn(app)) {
+                // Android 12 及以下，Wi-Fi Direct 要求系统定位开关打开；有权限就自动开，没有就引导去开
+                if (!LocationSwitch.set(app, true)) {
+                    Hub.fail("无法自动连接对方", "系统的“定位”开关是关着的（Android 12 及以下连接对方需要它）。请打开定位后重新扫码")
+                    LocationSwitch.openSettings(ctx)
+                    return
+                }
+                Store.ownLocation = true
+            }
+            val cred = LinkCred.of(q.fp)
+            Hub.toast("正在自动连接对方，请稍等…")
+            Hub.scope.launch {
+                try {
+                    val done = CompletableDeferred<Boolean>()
+                    P2pJoin.join(app, JoinParams(cred.ssid, cred.pwd, q.id, q.name, q.port, q.k, q.fp), done, pairing = true)
+                    if (done.await()) {
+                        withContext(Dispatchers.Main) { onChat(q.id) }
+                    } else {
+                        // 配对本身失败时 Hub.pair 已经弹过窗；没弹过的（连不上对方群组等）在这里补上原因
+                        if (Hub.errorDialog.value == null) {
+                            val why = P2pJoin.lastError.trim('（', '）').ifEmpty { "系统没有给出原因" }
+                            Hub.fail(
+                                "自动连接对方失败", why,
+                                "对方：${q.name}\n群组名：${cred.ssid}\n请让对方保持“我的二维码”页面不要关，并打开 Wi-Fi 开关后重新扫码"
+                            )
+                        }
+                        HotspotJoin.leave()
+                    }
+                } catch (e: Exception) {
+                    Hub.fail("自动连接对方失败", friendlyError(e), techDetail(e))
+                    HotspotJoin.leave()
+                }
+            }
+        } catch (e: Exception) {
+            Hub.fail("自动连接对方失败", friendlyError(e), techDetail(e))
         }
     }
 }
