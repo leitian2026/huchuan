@@ -46,6 +46,10 @@ object Hub {
     @Volatile var discovery: Discovery? = null
     @Volatile var openPeer: String? = null      // 当前打开的聊天对象
     @Volatile var appVisible = false            // 应用界面当前是否在前台可见（退到桌面/锁屏后为 false）
+    /** 本 app 自己拉起了系统选文件界面：app 会暂时退到后台，但这不算离开，连接要原样保留 */
+    @Volatile var picking = false
+    /** 界面被系统销毁重建（不是用户退出）：重建过程中界面销毁不能当成“离开对话框”去断开连接 */
+    @Volatile var recreating = false
     /** 点击通知后要打开的聊天（界面收到后清空） */
     val openChatRequest = MutableStateFlow<String?>(null)
 
