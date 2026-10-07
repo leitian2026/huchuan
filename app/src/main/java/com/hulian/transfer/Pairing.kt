@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -60,6 +61,18 @@ object Pairing {
     )
 
     fun handle(ctx: Context, text: String, onChat: (String) -> Unit) {
+        // 扫码前先清掉自动连接留下的群组 / 连接，等系统拆完再继续（二维码内容无效时也不影响，清理本身无害）
+        if (AutoLink.releaseForPairing()) {
+            Hub.scope.launch {
+                delay(1500)
+                withContext(Dispatchers.Main) { handleNow(ctx, text, onChat) }
+            }
+        } else {
+            handleNow(ctx, text, onChat)
+        }
+    }
+
+    private fun handleNow(ctx: Context, text: String, onChat: (String) -> Unit) {
         val j = try { JSONObject(text) } catch (e: Exception) { null }
         if (j == null || j.optString("t") != "hl") {
             Hub.toast("这不是互传的二维码")
