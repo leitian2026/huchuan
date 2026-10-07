@@ -108,6 +108,8 @@ fun MyQrScreen(onBack: () -> Unit) {
     var lan by remember { mutableStateOf<String?>(null) }
     val startHello = remember { Hub.helloCount }
     var p2pMode by remember { mutableStateOf(false) }
+    // Wi-Fi Direct 群组建不出来的原因：不能悄悄吞掉，显示在页面上
+    var p2pNote by remember { mutableStateOf<String?>(null) }
     var p2pQr by remember { mutableStateOf<String?>(null) }
     val p2pUp by DirectGroup.up.collectAsState()
     // 没有 Wi-Fi：优先建 Wi-Fi Direct 群组（扫码方自动加入，没有系统弹窗、不用手动连）；建不出来才退回本地热点
@@ -120,8 +122,10 @@ fun MyQrScreen(onBack: () -> Unit) {
             return
         }
         p2pMode = true
-        DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { _ ->
+        p2pNote = null
+        DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
             p2pMode = false
+            p2pNote = "Wi-Fi Direct 没建成：$msg。已改用本地热点"
             HotspotHost.start(ctx)
         }
     }
@@ -160,7 +164,9 @@ fun MyQrScreen(onBack: () -> Unit) {
             lan = lanPayload(ip)
             // 同时建好 Wi-Fi Direct 群组（固定名称密码，对方由二维码里的指纹算出）：对方没连同一个 Wi-Fi 时扫码后自动加入
             if (hotspotCoreGranted(ctx) && !DirectGroup.up.value && !DirectGroup.starting) {
-                DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { }
+                DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
+                    p2pNote = "Wi-Fi Direct 没建成：$msg。对方必须连着同一个 Wi-Fi 才能扫这个码"
+                }
             }
         } else {
             startHotspot()
@@ -200,6 +206,7 @@ fun MyQrScreen(onBack: () -> Unit) {
                     else "让对方打开互传，点“扫一扫”扫这个码\n（已创建临时热点，不耗流量；对方会暂时离开原来的 Wi-Fi）",
                     color = Gray, fontSize = 14.sp, textAlign = TextAlign.Center
                 )
+                p2pNote?.let { Text(it, color = Color(0xFFE5484D), fontSize = 12.sp, textAlign = TextAlign.Center) }
                 if (lan != null) {
                     OutlinedButton(onClick = { DirectGroup.stop(); lan = null; startHotspot() }) { Text("对方没连 Wi-Fi？改用热点") }
                     Text(
@@ -215,6 +222,7 @@ fun MyQrScreen(onBack: () -> Unit) {
             }
             hsErr?.let {
                 Text(it, color = Color(0xFFE5484D), fontSize = 13.sp, textAlign = TextAlign.Center)
+                p2pNote?.let { n -> Text(n, color = Color(0xFFE5484D), fontSize = 13.sp, textAlign = TextAlign.Center) }
                 Button(onClick = { startHotspot() }) { Text("重试") }
                 OutlinedButton(onClick = {
                     ctx.startActivity(
@@ -223,7 +231,7 @@ fun MyQrScreen(onBack: () -> Unit) {
                     )
                 }) { Text("去设置") }
                 OutlinedButton(onClick = {
-                    try { ctx.startActivity(Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)) } catch (_: Exception) {}
+                    try { ctx.startActivity(Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)) } catch (e: Exception) { Hub.log("ConnectUi", e) }
                 }) { Text("手动打开系统热点") }
                 Text(
                     "不想授权也可以：在系统里打开\u201c个人热点\u201d，让对方连上它。本页检测到后会自动显示二维码，对方扫码即可（不需要任何额外权限）",
