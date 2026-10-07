@@ -137,7 +137,7 @@ fun RoleTag(role: LinkRole) {
     val host = role == LinkRole.HOST
     Text(
         if (host) "创建方" else "接收方",
-        fontSize = 11.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+        fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1,
         color = if (host) Color(0xFF1565C0) else Color(0xFF2E7D32),
         modifier = Modifier.clip(RoundedCornerShape(9.dp))
             .background(if (host) Color(0xFFE3F2FD) else Color(0xFFE8F5E9))
