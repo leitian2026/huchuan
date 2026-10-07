@@ -38,16 +38,20 @@ class Discovery(ctx: Context) {
             setAttribute("name", Store.deviceName)
         }
         val r = object : NsdManager.RegistrationListener {
-            override fun onRegistrationFailed(i: NsdServiceInfo, code: Int) {}
+            override fun onRegistrationFailed(i: NsdServiceInfo, code: Int) {
+                Hub.reportOnce("nsd-reg", "同一 Wi-Fi 自动发现：本机注册失败", "别的手机可能自动发现不了本机（仍可扫码配对）", "NSD 错误码 $code")
+            }
             override fun onUnregistrationFailed(i: NsdServiceInfo, code: Int) {}
             override fun onServiceRegistered(i: NsdServiceInfo) {}
             override fun onServiceUnregistered(i: NsdServiceInfo) {}
         }
         reg = r
-        try { nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, r) } catch (_: Exception) {}
+        try { nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, r) } catch (e: Exception) { Hub.log("Discovery", e) }
 
         val d = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(t: String, code: Int) {}
+            override fun onStartDiscoveryFailed(t: String, code: Int) {
+                Hub.reportOnce("nsd-disc", "同一 Wi-Fi 自动发现：搜索失败", "本机可能发现不了别的手机（仍可扫码配对）", "NSD 错误码 $code")
+            }
             override fun onStopDiscoveryFailed(t: String, code: Int) {}
             override fun onDiscoveryStarted(t: String) {}
             override fun onDiscoveryStopped(t: String) {}
@@ -59,15 +63,15 @@ class Discovery(ctx: Context) {
             }
         }
         disc = d
-        try { nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, d) } catch (_: Exception) {}
+        try { nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, d) } catch (e: Exception) { Hub.log("Discovery", e) }
         beacon.start()
     }
 
     @Synchronized
     fun stop() {
         beacon.stop()
-        reg?.let { try { nsd.unregisterService(it) } catch (_: Exception) {} }
-        disc?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
+        reg?.let { try { nsd.unregisterService(it) } catch (e: Exception) { Hub.log("Discovery", e) } }
+        disc?.let { try { nsd.stopServiceDiscovery(it) } catch (e: Exception) { Hub.log("Discovery", e) } }
         reg = null
         disc = null
         synchronized(queue) { queue.clear(); resolving = false }
@@ -95,7 +99,7 @@ class Discovery(ctx: Context) {
             nsd.resolveService(s, object : NsdManager.ResolveListener {
                 override fun onResolveFailed(i: NsdServiceInfo, code: Int) = done()
                 override fun onServiceResolved(i: NsdServiceInfo) {
-                    try { handle(i) } catch (_: Exception) {}
+                    try { handle(i) } catch (e: Exception) { Hub.log("Discovery", e) }
                     done()
                 }
             })
@@ -133,7 +137,7 @@ class Beacon(private val ctx: Context) {
         try {
             val wm = ctx.getSystemService(Context.WIFI_SERVICE) as WifiManager
             lock = wm.createMulticastLock("hulian").apply { setReferenceCounted(false); acquire() }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Discovery", e) }
         val s = try {
             DatagramSocket(null).apply {
                 reuseAddress = true
@@ -141,6 +145,7 @@ class Beacon(private val ctx: Context) {
                 bind(InetSocketAddress(udpPort))
             }
         } catch (e: Exception) {
+            Hub.reportOnce("udp-bind", "局域网广播发现启动失败", "UDP 端口 $udpPort 打不开，广播方式的自动发现不可用（仍可扫码配对）", techDetail(e))
             return
         }
         sock = s
@@ -157,9 +162,9 @@ class Beacon(private val ctx: Context) {
     fun stop() {
         jobs.forEach { it.cancel() }
         jobs.clear()
-        try { sock?.close() } catch (_: Exception) {}
+        try { sock?.close() } catch (e: Exception) { Hub.log("Discovery", e) }
         sock = null
-        try { lock?.release() } catch (_: Exception) {}
+        try { lock?.release() } catch (e: Exception) { Hub.log("Discovery", e) }
         lock = null
     }
 
@@ -186,15 +191,15 @@ class Beacon(private val ctx: Context) {
         val data = JSONObject().put("t", "hlb").put("id", Store.deviceId)
             .put("name", Store.deviceName).put("port", Hub.port).toString().toByteArray(Charsets.UTF_8)
         val targets = HashSet<InetAddress>()
-        try { targets.add(InetAddress.getByName("255.255.255.255")) } catch (_: Exception) {}
+        try { targets.add(InetAddress.getByName("255.255.255.255")) } catch (e: Exception) { Hub.log("Discovery", e) }
         try {
             for (ni in Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp || ni.isLoopback) continue
                 for (ia in ni.interfaceAddresses) ia.broadcast?.let { targets.add(it) }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Discovery", e) }
         for (t in targets) {
-            try { s.send(DatagramPacket(data, data.size, t, udpPort)) } catch (_: Exception) {}
+            try { s.send(DatagramPacket(data, data.size, t, udpPort)) } catch (e: Exception) { Hub.log("Discovery", e) }
         }
     }
 }
