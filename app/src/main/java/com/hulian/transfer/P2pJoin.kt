@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
  * 已配对设备自动连接（接收方）：用 Wi-Fi Direct 的 WifiP2pManager.connect，按群组名称 + 密码直接加入对方建好的群组。
  * 不再走 WifiNetworkSpecifier，所以没有系统的“选择设备”窗口，也就没有“该应用已取消选择设备的请求”。
  * 状态仍然记在 HotspotJoin.active / linked / autoMode 上，AutoLink 的状态条和事件监听不用改。
- * 完全由系统回调驱动：连接结果、群组变化的广播；只有一个 30 秒的一次性超时（对方群组还没建好时 connect 不会有失败回调）
+ * 完全由系统回调驱动：连接结果、群组变化的广播；只有一个 12 秒的一次性超时（对方群组还没建好时 connect 不会有失败回调；使用中观察到系统只在开头几秒内搜索对方群组，搜不到就不再找，所以超时要短，让 AutoLink 尽快重新发起一次搜索）
  */
 object P2pJoin {
     private val h = Handler(Looper.getMainLooper())
@@ -34,7 +34,7 @@ object P2pJoin {
     @Volatile var lastError = ""
         private set
 
-    private const val CONNECT_TIMEOUT_MS = 30_000L
+    private const val CONNECT_TIMEOUT_MS = 12_000L
 
     @SuppressLint("MissingPermission")
     fun join(ctx: Context, p: JoinParams, done: CompletableDeferred<Boolean>, pairing: Boolean = false) {
@@ -140,7 +140,7 @@ object P2pJoin {
             finish(false, "（群组参数无效）")
             return
         }
-        val t = Runnable { finish(false, "（30 秒内没有加入对方的群组：对方可能已离开二维码页面、没有建成群组，或两台手机离得太远）") }
+        val t = Runnable { finish(false, "（${CONNECT_TIMEOUT_MS / 1000} 秒内没有加入对方的群组：对方可能已离开二维码页面、没有建成群组，或两台手机离得太远）") }
         timeout = t
         h.postDelayed(t, CONNECT_TIMEOUT_MS)
         try {
