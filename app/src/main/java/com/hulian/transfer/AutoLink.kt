@@ -229,7 +229,7 @@ object AutoLink {
             try { app.startService(Intent(app, ExitWatcher::class.java)) } catch (e: Exception) { Hub.log("AutoLink", e) }
             keeper = Hub.scope.launch {
                 for (k in kicks) {
-                    if (Hub.appVisible && !paused && target != null) {
+                    if ((Hub.appVisible || Hub.picking) && !paused && target != null) {
                         try { step(app) } catch (e: Exception) { Hub.log("AutoLink", e) }
                     }
                 }
