@@ -54,6 +54,8 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         AutoLink.resume()
+        // 上次没来得及关的群组（app 被系统杀掉 / 崩溃）：启动时拆掉
+        if (savedInstanceState == null) DirectGroup.cleanupStale(this)
         setContent { HulianTheme { AppRoot() } }
         // 前台服务不依赖通知权限，直接启动；权限在首次使用时由界面统一说明并申请
         ContextCompat.startForegroundService(this, Intent(this, TransferService::class.java))
