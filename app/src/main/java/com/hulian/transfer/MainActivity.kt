@@ -31,17 +31,20 @@ class MainActivity : ComponentActivity() {
             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         // 回到前台：如果对话框还开着，重新监听并检查一次（平时不自动开热点）
-        AutoLink.onForeground(this)
+        // 从系统选文件界面回来时不动连接：监听一直没断，没必要重新检查
+        if (!Hub.picking) AutoLink.onForeground(this)
     }
 
     override fun onStop() {
         Hub.appVisible = false
-        AutoLink.onBackground()
+        if (!Hub.picking) AutoLink.onBackground()
         super.onStop()
     }
 
     override fun onDestroy() {
-        // 真正退出（返回键退出 / 被关闭）才关；旋转屏幕等重建不算
+        // 真正退出（返回键退出 / 被关闭）才关；旋转屏幕、系统回收重建等不算
+        // 要在 super.onDestroy() 之前设：界面销毁时 Compose 的 onDispose 就是在 super 里触发的
+        Hub.recreating = !isFinishing
         if (isFinishing) AutoLink.exit()
         super.onDestroy()
     }
@@ -53,6 +56,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        Hub.recreating = false
         AutoLink.resume()
         // 上次没来得及关的群组（app 被系统杀掉 / 崩溃）：启动时拆掉
         if (savedInstanceState == null) DirectGroup.cleanupStale(this)
