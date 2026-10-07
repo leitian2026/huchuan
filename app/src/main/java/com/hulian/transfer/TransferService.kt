@@ -37,7 +37,11 @@ class TransferService : Service() {
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
-        Server.start()
+        try {
+            Server.start()
+        } catch (e: Exception) {
+            Hub.report("无法启动接收服务", e, "别的手机将无法给本机发送文字和文件")
+        }
         if (discovery == null) {
             discovery = Discovery(this).also {
                 Hub.discovery = it
@@ -58,13 +62,13 @@ class TransferService : Service() {
                 }
             }
             netCb = cb
-            try { getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) } catch (_: Exception) {}
+            try { getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) } catch (e: Exception) { Hub.log("TransferService", e) }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        netCb?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (_: Exception) {} }
+        netCb?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (e: Exception) { Hub.log("TransferService", e) } }
         netCb = null
         discovery?.stop()
         discovery = null
