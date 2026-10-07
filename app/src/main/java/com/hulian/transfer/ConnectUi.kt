@@ -1,9 +1,8 @@
 package com.hulian.transfer
 
-import android.content.Context
 import android.content.Intent
-import android.net.wifi.WifiManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -27,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** 扫码入口：返回一个“点击即启动扫码”的函数，扫到的结果自动处理 */
 @Composable
@@ -75,21 +75,26 @@ fun MyQrScreen(onBack: () -> Unit) {
     var p2pNote by remember { mutableStateOf<String?>(null) }
     var p2pQr by remember { mutableStateOf<String?>(null) }
     val p2pUp by DirectGroup.up.collectAsState()
+    val scope = rememberCoroutineScope()
     // 没有 Wi-Fi：优先建 Wi-Fi Direct 群组（扫码方自动加入，没有系统弹窗、不用手动连）；建不出来才退回本地热点
     fun startNoWifi() {
         HotspotHost.error.value = null
         p2pQr = null
-        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        if (!wm.isWifiEnabled) {
-            HotspotHost.error.value = "请先打开 Wi-Fi 开关（不需要连接任何网络），再点“重试”"
-            return
-        }
-        p2pMode = true
-        p2pNote = null
-        DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
-            p2pMode = false
-            p2pNote = "Wi-Fi Direct 没建成：$msg。已改用本地热点"
-            HotspotHost.start(ctx)
+        scope.launch {
+            // Wi-Fi 开关、定位开关关着就自动打开（借 root / adb 授权）；本 app 打开的，离开本页没人连上时还原，连上了就等离开对话框 / 退出时还原
+            if (!AutoOpen.wifi(ctx)) {
+                HotspotHost.error.value = "请先打开 Wi-Fi 开关（不需要连接任何网络），再点“重试”。自动打开失败：需要 root 授权"
+                return@launch
+            }
+            // 定位打不开也先试：Android 13+ 多数系统不需要；真不行时建热点失败的提示里会说明
+            AutoOpen.location(ctx)
+            p2pMode = true
+            p2pNote = null
+            DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
+                p2pMode = false
+                p2pNote = "Wi-Fi Direct 没建成：$msg。已改用本地热点"
+                HotspotHost.start(ctx)
+            }
         }
     }
     LaunchedEffect(p2pUp, p2pMode) {
@@ -125,6 +130,8 @@ fun MyQrScreen(onBack: () -> Unit) {
             lan = lanPayload(ip)
             // 同时建好 Wi-Fi Direct 群组（固定名称密码，对方由二维码里的指纹算出）：对方没连同一个 Wi-Fi 时扫码后自动加入
             if (hotspotCoreGranted(ctx) && !DirectGroup.up.value && !DirectGroup.starting) {
+                // Android 12 及以下建群组要求定位开着：关着就自动打开（Android 13+ 不需要，不去动它）
+                if (Build.VERSION.SDK_INT < 33) AutoOpen.location(ctx)
                 DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
                     p2pNote = "Wi-Fi Direct 没建成：$msg。对方必须连着同一个 Wi-Fi 才能扫这个码"
                 }
@@ -146,7 +153,13 @@ fun MyQrScreen(onBack: () -> Unit) {
     }
     // 离开本页时，如果还没有人连上，就关掉热点；已经连上的要保留，否则传输会中断
     DisposableEffect(Unit) {
-        onDispose { if (Hub.helloCount == startHello) { HotspotHost.stop(); DirectGroup.stop() } }
+        onDispose {
+            if (Hub.helloCount == startHello) {
+                HotspotHost.stop()
+                DirectGroup.stop()
+                AutoLink.restoreSwitches()   // 没配对成功：把本页自动打开的 Wi-Fi / 定位还原
+            }
+        }
     }
 
     val payload = lan ?: hsPayload ?: p2pQr
