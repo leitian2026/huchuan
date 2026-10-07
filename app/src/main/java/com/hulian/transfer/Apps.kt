@@ -55,6 +55,7 @@ object Apps {
     fun icon(ctx: Context, pkg: String): ImageBitmap? = try {
         ctx.packageManager.getApplicationIcon(pkg).toBitmap(96, 96).asImageBitmap()
     } catch (e: Exception) {
+        Hub.log("读取应用图标 $pkg", e)
         null
     }
 
@@ -126,7 +127,7 @@ object Installer {
                     session.commit(pend.intentSender)
                 }
             } catch (e: Exception) {
-                Hub.toast("安装失败：" + (e.message ?: "未知错误"))
+                Hub.report("安装失败", e, "安装包：$fileName")
             }
         }
     }
@@ -148,7 +149,10 @@ class InstallReceiver : BroadcastReceiver() {
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> Hub.toast("安装完成")
-            else -> Hub.toast("安装失败：" + (i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "未知原因"))
+            else -> Hub.fail(
+                "安装失败", i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "系统没有给出原因",
+                "安装状态码：" + status
+            )
         }
     }
 }
