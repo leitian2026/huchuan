@@ -50,6 +50,11 @@ object Store {
         get() = prefs.getBoolean("ownLoc", false)
         set(v) { prefs.edit().putBoolean("ownLoc", v).apply() }
 
+    /** Wi-Fi 开关是不是本 app 打开的（退出对话框时只关自己开的；用户自己开的不记这里） */
+    var ownWifi: Boolean
+        get() = prefs.getBoolean("ownWifi", false)
+        set(v) { prefs.edit().putBoolean("ownWifi", v).apply() }
+
     private val msgFile get() = File(ctx.filesDir, "msgs.json")
     private val peerFile get() = File(ctx.filesDir, "peers.json")
 
