@@ -93,6 +93,7 @@ fun HomeTabs(
 @Composable
 fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
     var open by remember { mutableStateOf(false) }
+    val rootOk by Root.available.collectAsState()
     Box(
         Modifier.fillMaxWidth()
             .background(Brush.horizontalGradient(listOf(Blue1, Blue2)))
@@ -109,7 +110,23 @@ fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
                         .background(Color(0xFF5BD98C))
                 )
             }
-            Text(title, color = Color.White, fontSize = 18.sp, modifier = Modifier.align(Alignment.Center))
+            Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = Color.White, fontSize = 18.sp)
+                // 没有 root（或没授权）：Wi-Fi / 定位没法自动打开，在标题旁边提示；点一下重新检测
+                if (rootOk == false) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "没有root", color = Color.White, fontSize = 11.sp, lineHeight = 11.sp, maxLines = 1,
+                        modifier = Modifier.clip(RoundedCornerShape(9.dp))
+                            .background(Color(0x40FFFFFF))
+                            .clickable {
+                                Hub.toast("正在重新检测 root…")
+                                Root.refresh(force = true)
+                            }
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                    )
+                }
+            }
             Box(Modifier.align(Alignment.CenterEnd)) {
                 IconButton(onClick = { open = true }) { Icon(Icons.Default.Add, "添加", tint = Color.White) }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
