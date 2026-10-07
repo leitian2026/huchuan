@@ -1,8 +1,7 @@
 name: Build Debug APK
 
+# 只能手动触发：GitHub 仓库 → Actions → Build Debug APK → Run workflow（推送代码不会自动构建）
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
