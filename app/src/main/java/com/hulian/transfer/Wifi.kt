@@ -321,6 +321,19 @@ object HotspotJoin {
         }
     }
 
+    /** 本机当前有没有任何一个网络（Wi-Fi / 热点）和 ip 在同一网段；没有就说明根本连不到对方 */
+    @Suppress("DEPRECATION")
+    fun onSameNetwork(ctx: Context, ip: String): Boolean {
+        val m = ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
+        for (n in m.allNetworks) {
+            val caps = m.getNetworkCapabilities(n) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            val lp = m.getLinkProperties(n) ?: continue
+            if (sameSubnet(lp, ip)) return true
+        }
+        return false
+    }
+
     /**
      * 扫到的是局域网二维码：如果对方在一个不是系统默认网络的 Wi-Fi 里
      * （比如手动开的个人热点，没有网络、本机又开着流量），就绑定到那个 Wi-Fi，否则连不到对方。
@@ -391,7 +404,7 @@ object P2pJoin {
     private const val CONNECT_TIMEOUT_MS = 30_000L
 
     @SuppressLint("MissingPermission")
-    fun join(ctx: Context, p: JoinParams, done: CompletableDeferred<Boolean>) {
+    fun join(ctx: Context, p: JoinParams, done: CompletableDeferred<Boolean>, pairing: Boolean = false) {
         HotspotJoin.leave()
         lastError = ""
         val app = ctx.applicationContext
@@ -440,7 +453,10 @@ object P2pJoin {
             HotspotJoin.linked = true
             Hub.touch()
             Hub.toast("已连接到对方热点")
-            Hub.scope.launch { done.complete(HotspotJoin.reconnect(p, gw)) }
+            Hub.scope.launch {
+                if (pairing) done.complete(Hub.pair(p.peerId, p.peerName, gw, p.port, p.token, p.hostFp))   // 扫码配对：连上群组后用一次性口令配对
+                else done.complete(HotspotJoin.reconnect(p, gw))
+            }
         }
 
         val r = object : BroadcastReceiver() {
