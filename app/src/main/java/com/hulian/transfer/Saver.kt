@@ -52,7 +52,7 @@ object Saver {
         try {
             DocumentsContract.deleteDocument(ctx.contentResolver, uri)
         } catch (e: Exception) {
-            try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            try { ctx.contentResolver.delete(uri, null, null) } catch (e: Exception) { Hub.log("Saver", e) }
         }
     }
 
@@ -68,7 +68,7 @@ object Saver {
                     if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { Hub.log("Saver", e) }
         return name to size
     }
 
@@ -79,7 +79,7 @@ object Saver {
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         } catch (e: Exception) {
-            Hub.toast("没有可以打开该文件的应用，或文件已被移动/删除")
+            Hub.report("无法打开文件", e, "可能没有可以打开 ${name} 的应用，或文件已被移动 / 删除")
         }
     }
 }
