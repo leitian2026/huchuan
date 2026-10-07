@@ -122,6 +122,29 @@ fun TabTopBar(title: String, onScan: () -> Unit, onMyQr: () -> Unit) {
     }
 }
 
+/**
+ * 本机面对这台设备时的角色：给二维码的是“创建方”，扫码的是“接收方”。
+ * 优先用 AutoLink 里实时的角色（两边同时建热点而互换时会跟着变），没有就按配对记录算（重新配对改了记录也会跟着变）
+ */
+fun roleOf(p: Peer, live: Pair<String, LinkRole>?): LinkRole? {
+    if (!p.paired) return null
+    return if (live != null && live.first == p.id) live.second else AutoLink.roleFor(p)
+}
+
+/** 列表行右边的角色小标签：创建方蓝色，接收方绿色 */
+@Composable
+fun RoleTag(role: LinkRole) {
+    val host = role == LinkRole.HOST
+    Text(
+        if (host) "创建方" else "接收方",
+        fontSize = 11.sp, lineHeight = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+        color = if (host) Color(0xFF1565C0) else Color(0xFF2E7D32),
+        modifier = Modifier.clip(RoundedCornerShape(9.dp))
+            .background(if (host) Color(0xFFE3F2FD) else Color(0xFFE8F5E9))
+            .padding(horizontal = 7.dp, vertical = 3.dp)
+    )
+}
+
 /** 未读数徽标：一位数是正圆，两位数以上自动拉成胶囊；列表和底部导航共用 */
 @Composable
 fun UnreadBadge(count: Int) {
@@ -143,6 +166,7 @@ fun UnreadBadge(count: Int) {
 @Composable
 fun MessagesTab(onChat: (String) -> Unit) {
     val peers by Hub.peers.collectAsState()
+    val live by AutoLink.roleState.collectAsState()
     val msgs by Hub.msgs.collectAsState()
     val rows = remember(peers, msgs) {
         msgs.groupBy { it.peerId }.mapNotNull { (id, l) ->
@@ -173,10 +197,14 @@ fun MessagesTab(onChat: (String) -> Unit) {
                     Column(horizontalAlignment = Alignment.End) {
                         Text(fmtListTime(last.time), fontSize = 12.sp, color = Gray)
                         Spacer(Modifier.height(6.dp))
-                        if (unread > 0) {
-                            UnreadBadge(unread)
-                        } else {
-                            Spacer(Modifier.height(18.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            roleOf(p, live)?.let { RoleTag(it) }
+                            if (unread > 0) {
+                                Spacer(Modifier.width(6.dp))
+                                UnreadBadge(unread)
+                            } else {
+                                Spacer(Modifier.height(18.dp))
+                            }
                         }
                     }
                 }
@@ -191,6 +219,7 @@ fun MessagesTab(onChat: (String) -> Unit) {
 @Composable
 fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
     val peers by Hub.peers.collectAsState()
+    val live by AutoLink.roleState.collectAsState()
     var q by remember { mutableStateOf("") }
     val list = remember(peers, q) {
         peers.values.filter { q.isBlank() || it.name.contains(q, true) }
@@ -246,6 +275,7 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
                                 fontSize = 13.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
                         }
+                        roleOf(p, live)?.let { RoleTag(it); Spacer(Modifier.width(2.dp)) }
                         Box {
                             IconButton(onClick = { menuFor = p.id }) { Icon(Icons.Default.MoreVert, "更多", tint = Gray) }
                             DropdownMenu(expanded = menuFor == p.id, onDismissRequest = { menuFor = null }) {
