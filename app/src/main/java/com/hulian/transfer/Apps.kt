@@ -151,7 +151,7 @@ class InstallReceiver : BroadcastReceiver() {
             PackageInstaller.STATUS_SUCCESS -> Hub.toast("安装完成")
             else -> Hub.fail(
                 "安装失败", i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "系统没有给出原因",
-                "安装状态码：" + status
+                "安装状态码：" + i.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)
             )
         }
     }
