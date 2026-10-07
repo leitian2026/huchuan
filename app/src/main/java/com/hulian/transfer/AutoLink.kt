@@ -99,6 +99,7 @@ object AutoLink {
     @Volatile private var failures = 0
     @Volatile private var wifiTried = false      // 这次对话框里已经试过自动打开 Wi-Fi，失败了不反复弹 root 授权
     @Volatile private var wifiOpening = false
+    @Volatile private var wifiWarnAt = 0L        // Wi-Fi 一直关着时开始计时：关满 1 秒才显示红字，避免一闪而过
     @Volatile private var locTried = false       // 同上：定位这次对话框里只自动打开一次
     @Volatile private var locOpening = false
     @Volatile private var scanReqAt = 0L
@@ -390,9 +391,19 @@ object AutoLink {
                 }
                 return
             }
+            // 刚点开对话框时 Wi-Fi 状态可能正在变化（比如上次退出时还原的开关还没稳定）：先显示“正在打开”，关满 1 秒还没开才显示红字
+            if (wifiWarnAt == 0L) {
+                wifiWarnAt = now()
+                Hub.scope.launch { delay(1100); kicks.trySend(Unit) }
+            }
+            if (now() - wifiWarnAt < 1000) {
+                st(LinkKind.WORK, "正在打开 Wi-Fi…")
+                return
+            }
             st(LinkKind.WARN, "请打开 Wi-Fi 开关（不需要连接任何网络），打开后自动连接。自动打开失败：需要 root 授权")
             return
         }
+        wifiWarnAt = 0L
         when (ensureLocation(app)) {
             LocState.OPENING -> {
                 st(LinkKind.WORK, "正在打开定位…")
@@ -524,6 +535,7 @@ object AutoLink {
         needLocation.value = false
         // 上面的群组已经先拆了；再还原本 app 打开的 Wi-Fi / 定位（本来就开着的、用户自己开的不动）
         wifiTried = false
+        wifiWarnAt = 0L
         locTried = false
         restoreSwitches()
     }
