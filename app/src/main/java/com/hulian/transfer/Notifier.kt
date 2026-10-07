@@ -57,7 +57,8 @@ object Notifier {
                 .setContentIntent(pi)
                 .build()
             NotificationManagerCompat.from(ctx).notify(nid(peerId), n)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Hub.reportOnce("notify", "通知发送失败", "收到消息时无法弹出系统通知（可能没有授予通知权限）：" + friendlyError(e), techDetail(e))
         }
     }
 
@@ -65,7 +66,6 @@ object Notifier {
     fun cancel(peerId: String) {
         try {
             NotificationManagerCompat.from(Hub.app).cancel(nid(peerId))
-        } catch (_: Exception) {
-        }
+        } catch (e: Exception) { Hub.log("Notifier", e) }
     }
 }
