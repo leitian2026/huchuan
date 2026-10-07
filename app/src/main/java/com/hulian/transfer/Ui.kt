@@ -145,6 +145,34 @@ fun AppRoot() {
         if (Hub.peers.value.containsKey(id)) openChat(id)
     }
 
+    // 任何失败都在这里显示原因（可选中文字，也可以一键复制全部）
+    val errInfo by Hub.errorDialog.collectAsState()
+    errInfo?.let { e ->
+        val full = e.title + "：" + e.reason + (if (e.detail.isNotEmpty()) "\n\n详细信息：\n" + e.detail else "")
+        AlertDialog(
+            onDismissRequest = { Hub.dismissError() },
+            title = { Text(e.title) },
+            text = {
+                SelectionContainer {
+                    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(e.reason, fontSize = 15.sp)
+                        if (e.detail.isNotEmpty()) Text("详细信息：\n" + e.detail, fontSize = 12.sp, color = Gray)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { Hub.dismissError() }) { Text("知道了") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    try {
+                        ctx.getSystemService(android.content.ClipboardManager::class.java)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("error", full))
+                        Hub.toast("已复制")
+                    } catch (e: Exception) { Hub.log("Ui", e) }
+                }) { Text("复制") }
+            }
+        )
+    }
+
     // 配对确认：两台手机会显示同一个 6 位验证码，核对一致后被扫的一方点"同意"才算配对成功
     val prompt by Hub.pairPrompt.collectAsState()
     prompt?.let { p ->
@@ -188,20 +216,24 @@ fun AppRoot() {
         val p = HotspotJoin.needPerm.value
         HotspotJoin.needPerm.value = null
         if (p != null) {
-            if (hotspotCoreGranted(ctx)) HotspotJoin.join(ctx, p) else HotspotJoin.manual.value = p
+            if (hotspotCoreGranted(ctx)) HotspotJoin.join(ctx, p) else {
+                HotspotJoin.manualReason.value = "没有授予" + hotspotPermName() + "权限"
+                HotspotJoin.manual.value = p
+            }
         }
     }
     LaunchedEffect(needPerm) {
         if (needPerm != null) joinPermLauncher.launch(hotspotPermsMissing(ctx).toTypedArray())
     }
     val manual by HotspotJoin.manual.collectAsState()
+    val manualWhy by HotspotJoin.manualReason.collectAsState()
     manual?.let { p ->
         AlertDialog(
             onDismissRequest = { HotspotJoin.manual.value = null },
             title = { Text("手动连接对方的热点") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("自动连接用不了（缺少权限或被系统拒绝），可以手动连：", fontSize = 14.sp)
+                    Text("自动连接用不了，原因：" + manualWhy.ifEmpty { "系统没有给出原因" } + "\n\n可以手动连：", fontSize = 14.sp)
                     Text("Wi-Fi 名称：" + p.ssid + "\n密码：" + p.pwd, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                     Text(
                         "在系统的 Wi-Fi 列表里连上它（提示\u201c无法上网\u201d没关系，选保持连接）。连上后回到互传，点\u201c已连接，继续\u201d。",
@@ -437,7 +469,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.forEach {
-            try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+            try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { Hub.log("记住文件读取权限", e) }
             Hub.sendFile(peerId, it)
         }
     }
