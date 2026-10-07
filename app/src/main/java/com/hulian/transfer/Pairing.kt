@@ -57,6 +57,10 @@ fun hotspotPermName(): String =
 
 /** 处理扫到的二维码：局域网二维码直接配对；热点二维码自动连热点（没有权限就改为手动连） */
 object Pairing {
+    /** 二维码里不变的部分：设备信息 + 一次性配对口令 + 证书指纹。局域网 / 热点 / Wi-Fi Direct 三种二维码都在它上面再加各自的字段 */
+    fun qrBase(): JSONObject = JSONObject().put("t", "hl").put("id", Store.deviceId).put("name", Store.deviceName)
+        .put("port", Hub.port).put("k", Hub.newPairToken()).put("fp", Identity.fp)
+
     private class Qr(
         val id: String, val name: String, val port: Int, val k: String, val fp: String,
         val ssid: String?, val pwd: String?, val ip: String?, val p2p: Boolean
