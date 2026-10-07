@@ -393,7 +393,9 @@ object AutoLink {
                 // 连接自身断开 / 建立
                 // 连接一断就作废之前的扫描结果：对方可能已经关了热点又重新开了，必须重新扫，不能拿旧结果去连
                 Hub.scope.launch { HotspotJoin.active.collect { on -> if (!on) scanReqAt = 0L; kick(reset = false) } },
-                Hub.scope.launch { DirectGroup.up.collect { on -> if (!on) scanReqAt = 0L; kick(reset = false) } }
+                Hub.scope.launch { DirectGroup.up.collect { on -> if (!on) scanReqAt = 0L; kick(reset = false) } },
+                // 二维码临时热点创建完成 / 关闭
+                Hub.scope.launch { HotspotHost.payload.collect { kick(reset = false) } }
             )
         }
         kick()
@@ -461,9 +463,20 @@ object AutoLink {
     private fun step(app: Context) {
         val id = target ?: run { status.value = null; return }
         val t = Hub.peers.value[id]?.takeIf { it.paired } ?: run { status.value = null; return }
-        // 用二维码手动连接 / 手动开的热点正在使用：不打扰
-        if (HotspotHost.isUp() || HotspotHost.starting || (HotspotJoin.active.value && !HotspotJoin.autoMode)) {
-            status.value = null
+        // 二维码配对用的临时热点 / 手动连接还留着：以前这里直接什么都不做、状态条也不显示，
+        // 配对后自动连接就永远不会开始（没连 Wi-Fi 时扫码配对最容易出现）。
+        // 对方已经在线说明它还在用，保留；对方不在线说明已经没用了，关掉后再继续自动连接
+        val manualLink = HotspotJoin.active.value && !HotspotJoin.autoMode
+        if (HotspotHost.isUp() || HotspotHost.starting || manualLink) {
+            if (t.online) {
+                st(LinkKind.OK, "已连接：${t.name}")
+            } else if (HotspotHost.starting) {
+                st(LinkKind.WORK, "正在关闭二维码用的临时热点…")   // 创建结果一出来 payload 变化会触发再检查
+            } else {
+                st(LinkKind.WORK, "正在关闭二维码用的临时热点，然后自动连接…")
+                HotspotHost.stop()
+                if (manualLink) HotspotJoin.leave()
+            }
             return
         }
         // 已经连上对方的热点（或正在连）
@@ -471,7 +484,7 @@ object AutoLink {
             when {
                 t.online -> st(LinkKind.OK, "已连接：${t.name}")
                 HotspotJoin.linked -> st(LinkKind.WORK, "已连上对方的热点，正在联系 ${t.name}…")
-                else -> st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
+                else -> st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（对方打开和本机的对话后自动连接）")
             }
             return
         }
@@ -570,17 +583,17 @@ object AutoLink {
         val cred = LinkCred.of(t.fp)
         val p = JoinParams(cred.ssid, cred.pwd, t.id, t.name, t.port, "", t.fp)
         joinedId = t.id
-        st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（如有系统弹窗请点\u201c连接\u201d）")
+        st(LinkKind.WORK, "正在等待 ${t.name} 的热点…（对方打开和本机的对话后自动连接）")
         clientJob = Hub.scope.launch {
             val done = CompletableDeferred<Boolean>()
-            HotspotJoin.join(app, p, auto = true, done = done)
+            P2pJoin.join(app, p, done)
             if (done.await()) {
                 failures = 0
                 st(LinkKind.OK, "已连接：${t.name}")
             } else {
                 HotspotJoin.leave()
                 joinedId = null
-                fail("没连上 ${t.name}：请确认对方也打开了和本机的对话，并开着 Wi-Fi 开关")
+                fail("没连上 ${t.name}${P2pJoin.lastError}：请确认对方也打开了和本机的对话，并开着 Wi-Fi 开关")
             }
         }
     }
