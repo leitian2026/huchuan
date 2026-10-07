@@ -75,7 +75,7 @@ object Net {
                 expectOk(ch.read())
             }
         } finally {
-            try { s.close() } catch (_: Exception) {}
+            try { s.close() } catch (e: Exception) { Hub.log("Net", e) }
         }
     }
 
@@ -103,7 +103,7 @@ object Net {
 
     /** 用户在"等待对方确认"弹窗里点了取消：直接断开连接 */
     fun cancelPair() {
-        try { pairSock?.close() } catch (_: Exception) {}
+        try { pairSock?.close() } catch (e: Exception) { Hub.log("Net", e) }
     }
 
     /**
@@ -141,7 +141,7 @@ object Net {
             return PairResult(reply.optString("name"), hostFp)
         } finally {
             pairSock = null
-            try { s.close() } catch (_: Exception) {}
+            try { s.close() } catch (e: Exception) { Hub.log("Net", e) }
         }
     }
 
@@ -174,8 +174,7 @@ object Net {
                 ch.flush()
                 ch.read()
             }
-        } catch (_: Exception) {
-        }
+        } catch (e: Exception) { Hub.log("Net", e) }
     }
 
     /**
@@ -296,7 +295,7 @@ object Server {
     @Synchronized
     fun start() {
         if (ss?.isClosed == false) return
-        val s = try { open(Store.port) } catch (e: Exception) { open(0) }
+        val s = try { open(Store.port) } catch (e: Exception) { Hub.log("接收端口 ${Store.port} 被占用，改用随机端口", e); open(0) }
         ss = s
         Hub.port = s.localPort
         Store.port = s.localPort
@@ -304,7 +303,7 @@ object Server {
             while (!s.isClosed) {
                 val c = try { s.accept() } catch (e: Exception) { break }
                 if (!slots.tryAcquire()) {
-                    try { c.close() } catch (_: Exception) {}
+                    try { c.close() } catch (e: Exception) { Hub.log("Net", e) }
                     continue
                 }
                 launch {
@@ -316,7 +315,7 @@ object Server {
 
     @Synchronized
     fun stop() {
-        try { ss?.close() } catch (_: Exception) {}
+        try { ss?.close() } catch (e: Exception) { Hub.log("Net", e) }
         ss = null
     }
 
@@ -374,8 +373,7 @@ object Server {
                     else -> no(ch, "不支持的消息类型")
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (e: Exception) { Hub.log("Net", e) }
     }
 
     private const val MAX_TEXT_LEN = 500_000
@@ -397,10 +395,14 @@ object Server {
      * 一致并点"同意"之后才真正配对。
      */
     private fun handlePairing(ch: Wire, h: JSONObject, guestFp: String, host: String) {
-        val tok = Hub.peekPairToken() ?: return // 没有在等人配对
-        val mac = try { Secure.unb64(h.getString("mac")) } catch (e: Exception) { return }
-        if (!Secure.constantTimeEquals(Tls.pairMac(tok, guestFp, Identity.fp), mac)) return // 口令不对
-        if (!Hub.consumePairToken(tok)) return // 口令只能成功使用一次，且必须是当前这个
+        val tok = Hub.peekPairToken() ?: run {
+            pairReply(ch, false, "对方现在没有在等待配对：对方的二维码已过期（15 分钟），或已离开“我的二维码”页。请让对方重新打开该页面再扫")
+            return
+        }
+        val bad = "口令不匹配：对方的二维码已被刷新或已用过一次。请让对方重新打开“我的二维码”页，再扫新的码"
+        val mac = try { Secure.unb64(h.getString("mac")) } catch (e: Exception) { pairReply(ch, false, bad); return }
+        if (!Secure.constantTimeEquals(Tls.pairMac(tok, guestFp, Identity.fp), mac)) { pairReply(ch, false, bad); return }
+        if (!Hub.consumePairToken(tok)) { pairReply(ch, false, bad); return }
         val id = h.optString("dev")
         val port = h.getInt("port")
         require(port in 1..65535)
@@ -461,8 +463,9 @@ object Server {
         val saved: Saver.Out = try {
             Saver.create(Hub.app, fname)
         } catch (e: Exception) {
-            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "无法保存文件") }
-            try { no(ch, "对方无法保存文件") } catch (_: Exception) {}
+            Hub.log("创建接收文件", e)
+            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "无法保存文件：" + friendlyError(e)) }
+            try { no(ch, "对方无法保存文件") } catch (e: Exception) { Hub.log("Net", e) }
             return
         }
         try {
@@ -489,7 +492,8 @@ object Server {
             ok(ch)
         } catch (e: Exception) {
             Saver.delete(Hub.app, saved.uri)
-            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "接收中断") }
+            Hub.log("接收文件", e)
+            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "接收中断：" + friendlyError(e)) }
         }
     }
 }
