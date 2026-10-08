@@ -138,7 +138,7 @@ object AutoLink {
     private const val RETRY_MAX = 12
 
     /** 远程优先：点开对话框后，远程中转还在连接时最多等这么久，再决定要不要用热点 */
-    private const val RELAY_WAIT_MS = 4_000L
+    private const val RELAY_WAIT_MS = 8_000L
 
     /** 热点已建好、等对方时的核对：每 2 秒一次，共 6 次 */
     private const val RECHECK_MS = 2_000L
@@ -163,6 +163,24 @@ object AutoLink {
         }
         st(LinkKind.WARN, "$reason，稍后自动重试（第 $failures/$RETRY_MAX 次，点这里立即重试）", "retry")
         later(RETRY_MS)
+    }
+
+    /** 设置里把“热点”关掉：撤掉本 app 建的 / 连的热点，还原自动打开的 Wi-Fi / 定位，并停掉自动重试 */
+    fun hotspotDisabled() {
+        retryJob?.cancel()
+        retryJob = null
+        scanTimer?.cancel()
+        recheckJob?.cancel()
+        recheckJob = null
+        clientJob?.cancel()
+        clientJob = null
+        role = null
+        joinedId = null
+        HotspotJoin.leave()
+        HotspotHost.stop()
+        DirectGroup.stop()
+        restoreSwitches()
+        kicks.trySend(Unit)
     }
 
     /** 新开界面时恢复（用户手动“断开”之后，重新点开对话框才会再连） */
@@ -214,6 +232,7 @@ object AutoLink {
         if (target == null) return
         val app = ctx.applicationContext
         appCtx = app
+        openAt = now()   // 刚回到前台，远程中转可能正在重连：重新给它一点时间，别马上去开 Wi-Fi / 定位
         registerReceiver(app)
         kick()
     }
@@ -344,6 +363,12 @@ object AutoLink {
     private fun step(app: Context) {
         val id = target ?: run { status.value = null; return }
         val t = Hub.peers.value[id]?.takeIf { it.paired } ?: run { status.value = null; return }
+        // 设置里关了“热点”：不自动开 Wi-Fi / 定位 / 热点，也不去连对方的热点
+        if (!Store.hotspotOn) {
+            if (t.online) st(LinkKind.OK, "已连接：${t.name}")
+            else st(LinkKind.WARN, "“热点”在设置里是关着的，不会自动连接（设置 → 传输方式）")
+            return
+        }
         // 二维码配对用的临时热点 / 手动连接还留着：以前这里直接什么都不做、状态条也不显示，
         // 配对后自动连接就永远不会开始（没连 Wi-Fi 时扫码配对最容易出现）。
         // 对方已经在线说明它还在用，保留；对方不在线说明已经没用了，关掉后再继续自动连接
