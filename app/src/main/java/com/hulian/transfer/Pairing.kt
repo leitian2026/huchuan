@@ -112,7 +112,10 @@ object Pairing {
             Hub.fail("扫码失败", "二维码里没有任何连接方式（既没有 Wi-Fi 地址，也没有热点或 Wi-Fi Direct 信息），请让对方更新互传后重新生成二维码")
             return
         }
+        val offHotspot = "对方用的是热点方式，但本机“热点”开关是关着的。请到 设置 → 传输方式 打开“热点”后重新扫码"
+        val offLan = "对方用的是同一 Wi-Fi 方式，但本机“同一 Wi-Fi”开关是关着的。请到 设置 → 传输方式 打开后重新扫码"
         if (q.ssid != null && q.pwd != null) {
+            if (!Store.hotspotOn) { Hub.fail("扫码失败", offHotspot); return }
             // 连对方热点要先开着 Wi-Fi：关着就自动打开（借 root）；打不开也继续，由后面的流程改为手动连接
             val ssid = q.ssid
             val pwd = q.pwd
@@ -125,7 +128,9 @@ object Pairing {
         } else if (q.ip != null) {
             // 本机没连上对方所在的 Wi-Fi / 热点：对方二维码里带了 p2p 标记就自动加入对方的 Wi-Fi Direct 群组再配对，不用用户手动连
             if (!HotspotJoin.onSameNetwork(ctx, q.ip)) {
-                if (q.p2p) {
+                if (q.p2p && !Store.hotspotOn) {
+                    Hub.fail("扫码失败", offHotspot)
+                } else if (q.p2p) {
                     joinViaP2p(ctx, q, onChat)
                 } else {
                     Hub.fail(
@@ -136,6 +141,7 @@ object Pairing {
                 }
                 return
             }
+            if (!Store.lanOn) { Hub.fail("扫码失败", offLan); return }
             // 对方在一个没有网络的 Wi-Fi 里（比如手动开的个人热点）而本机默认走流量时，要先绑定到那个 Wi-Fi
             HotspotJoin.bindWifiFor(ctx, q.ip)
             Hub.scope.launch {
@@ -143,6 +149,7 @@ object Pairing {
             }
         } else if (q.p2p) {
             // 对方没有 Wi-Fi 也没有热点，只建了 Wi-Fi Direct 群组：直接自动加入
+            if (!Store.hotspotOn) { Hub.fail("扫码失败", offHotspot); return }
             joinViaP2p(ctx, q, onChat)
         }
     }
