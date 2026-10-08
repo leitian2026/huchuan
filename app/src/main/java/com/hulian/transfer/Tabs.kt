@@ -195,6 +195,7 @@ fun UnreadBadge(count: Int) {
 @Composable
 fun MessagesTab(onChat: (String) -> Unit) {
     val peers by Hub.peers.collectAsState()
+    val relayOnline by Relay.online.collectAsState()
     val live by AutoLink.roleState.collectAsState()
     val msgs by Hub.msgs.collectAsState()
     val rows = remember(peers, msgs) {
@@ -215,10 +216,17 @@ fun MessagesTab(onChat: (String) -> Unit) {
                     Modifier.fillMaxWidth().clickable { onChat(p.id) }.padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Avatar(p.name, p.online, 52.dp)
+                    val remote = p.paired && !p.online && p.id in relayOnline
+                    Avatar(p.name, p.online || remote, 52.dp)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(p.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(p.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                            if (p.paired && (p.online || remote)) {
+                                Spacer(Modifier.width(6.dp))
+                                Text(if (p.online) "[在线]" else "[在线·远程]", fontSize = 12.sp, color = Color(0xFF2E7D32), maxLines = 1)
+                            }
+                        }
                         Spacer(Modifier.height(3.dp))
                         Text(previewOf(last), fontSize = 14.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -387,6 +395,7 @@ fun SettingsContent() {
             }
         }
     }
+    TransportSettingsCard()
     RelaySettingsCard()
     Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
