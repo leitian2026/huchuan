@@ -25,6 +25,9 @@ object Relay {
     val state = MutableStateFlow("未启用")
     val connected = MutableStateFlow(false)
 
+    /** 这次连接上是否已经收到过 Cloudflare 发来的“谁在线”名单（没收到之前，“对方在线 / 不在线”还不能下结论） */
+    val presence = MutableStateFlow(false)
+
     /** 通过 Cloudflare 看到“在线”的设备（不含本机） */
     val online = MutableStateFlow<Set<String>>(emptySet())
 
@@ -58,6 +61,9 @@ object Relay {
 
     fun ready(p: Peer) = notReadyReason(p) == null
 
+    /** 远程中转还在出结果：正在连接，或者已连上但还没收到“谁在线”名单。自动连接热点前先等它一小会儿（远程优先） */
+    fun settling() = configured() && (state.value.startsWith("正在连接") || (connected.value && !presence.value))
+
     // ---------- 连接 ----------
 
     fun start() {
@@ -81,6 +87,7 @@ object Relay {
         try { sock?.close(1000, "bye") } catch (e: Exception) { Hub.log("Relay", e) }
         sock = null
         connected.value = false
+        presence.value = false
         online.value = emptySet()
     }
 
@@ -104,6 +111,7 @@ object Relay {
         while (currentCoroutineContext().isActive) {
             val why = connectOnce()
             connected.value = false
+            presence.value = false
             online.value = emptySet()
             Hub.log("远程中转", IOException(why))
             state.value = "未连接：$why（${backoff / 1000} 秒后重试）"
@@ -182,6 +190,7 @@ object Relay {
                 "presence" -> {
                     val a = j.getJSONArray("online")
                     online.value = (0 until a.length()).map { a.getString(it) }.filter { it != Store.deviceId }.toSet()
+                    presence.value = true
                 }
                 "notify" -> {
                     val from = j.getString("from")
