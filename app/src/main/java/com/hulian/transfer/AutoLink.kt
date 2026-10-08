@@ -104,6 +104,7 @@ object AutoLink {
     @Volatile private var locOpening = false
     @Volatile private var scanReqAt = 0L
     @Volatile private var scanDoneAt = 0L
+    @Volatile private var openAt = 0L           // 点开对话框的时刻：远程中转还没出结果时，最多等到这之后 RELAY_WAIT_MS 毫秒
     private var locAsked = false
 
     private val receiver = object : BroadcastReceiver() {
@@ -135,6 +136,9 @@ object AutoLink {
     /** 失败后重试：每 2 秒一次，共 12 次（单次连接最长 12 秒，对方晚建热点时靠重新发起连接来重新搜索，总共能等约 3 分钟） */
     private const val RETRY_MS = 2_000L
     private const val RETRY_MAX = 12
+
+    /** 远程优先：点开对话框后，远程中转还在连接时最多等这么久，再决定要不要用热点 */
+    private const val RELAY_WAIT_MS = 4_000L
 
     /** 热点已建好、等对方时的核对：每 2 秒一次，共 6 次 */
     private const val RECHECK_MS = 2_000L
@@ -228,6 +232,7 @@ object AutoLink {
         }
         if (target != peerId) role = null
         target = peerId
+        openAt = now()
         st(LinkKind.WORK, "正在准备连接…")
         registerReceiver(app)
         if (keeper?.isActive != true) {
@@ -247,6 +252,10 @@ object AutoLink {
                 },
                 // 连接自身断开 / 建立
                 // 连接一断就作废之前的扫描结果：对方可能已经关了热点又重新开了，必须重新扫，不能拿旧结果去连
+                // 远程中转连上 / 断开 / 对方上线下线 / 名单到达：远程优先，热点只在远程用不了时才作为备用，所以这些变化都要重新判断
+                Hub.scope.launch { Relay.connected.collect { kick() } },
+                Hub.scope.launch { Relay.presence.collect { kick() } },
+                Hub.scope.launch { Relay.online.collect { kick() } },
                 Hub.scope.launch { HotspotJoin.active.collect { on -> if (!on) scanReqAt = 0L; kick(reset = false) } },
                 Hub.scope.launch { DirectGroup.up.collect { on -> if (!on) scanReqAt = 0L; kick(reset = false) } },
                 // 二维码临时热点创建完成 / 关闭
@@ -350,6 +359,34 @@ object AutoLink {
                 if (manualLink) HotspotJoin.leave()
             }
             return
+        }
+        // 远程优先：双方密钥齐了、对方也连着 Cloudflare，就走远程中转，不开 Wi-Fi / 定位 / 热点（省电）。
+        // 热点只在远程用不了时才作为备用。对方已经直连在线的（热点 / 同一 Wi-Fi）保持不动
+        if (!t.online && Relay.ready(t)) {
+            if (Relay.connected.value && t.id in Relay.online.value) {
+                retryJob?.cancel()
+                retryJob = null
+                scanTimer?.cancel()
+                recheckJob?.cancel()
+                recheckJob = null
+                clientJob?.cancel()
+                clientJob = null
+                joinedId = null
+                failures = 0
+                scanReqAt = 0L
+                // 正在等对方热点 / 本机热点还在等人：不用了，撤掉（本 app 自己建 / 连的才会动）
+                if (HotspotJoin.active.value) HotspotJoin.leave()
+                if (DirectGroup.up.value || DirectGroup.starting) DirectGroup.stop()
+                st(LinkKind.OK, "已连接：${t.name}（远程中转，不用开热点）")
+                return
+            }
+            // 远程中转还在连接：先等一小会儿再决定（事件一到就会重新检查；超时再用热点备用）
+            val waited = now() - openAt
+            if (Relay.settling() && waited < RELAY_WAIT_MS) {
+                st(LinkKind.WORK, "正在联系远程中转…")
+                later(RELAY_WAIT_MS - waited + 50)
+                return
+            }
         }
         // 已经连上对方的热点（或正在连）
         if (HotspotJoin.active.value) {
