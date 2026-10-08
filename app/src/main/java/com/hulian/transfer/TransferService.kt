@@ -50,6 +50,7 @@ class TransferService : Service() {
         }
         Hub.startSweeper()
         Hub.probeKnown()
+        Relay.start()
 
         if (netCb == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
@@ -70,6 +71,7 @@ class TransferService : Service() {
     override fun onDestroy() {
         netCb?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (e: Exception) { Hub.log("TransferService", e) } }
         netCb = null
+        Relay.stop()
         discovery?.stop()
         discovery = null
         Hub.discovery = null
