@@ -44,7 +44,7 @@ object Store {
         get() = prefs.getBoolean("hsOn", true)
         set(v) { prefs.edit().putBoolean("hsOn", v).apply() }
 
-    // ---------- 远程中转：Cloudflare（通知）+ 坚果云 WebDAV（存放加密内容） ----------
+    // ---------- 远程中转：Cloudflare（通知）+ 网盘 WebDAV（存放加密内容） ----------
     var relayOn: Boolean
         get() = prefs.getBoolean("rOn", false)
         set(v) { prefs.edit().putBoolean("rOn", v).apply() }
@@ -54,20 +54,29 @@ object Store {
     var relaySecret: String
         get() = secret("rSec")
         set(v) = putSecret("rSec", v)
-    var davUrl: String
-        get() = prefs.getString("dUrl", "https://dav.jianguoyun.com/dav/") ?: ""
-        set(v) { prefs.edit().putString("dUrl", v).apply() }
-    var davUser: String
-        get() = prefs.getString("dUser", "") ?: ""
-        set(v) { prefs.edit().putString("dUser", v).apply() }
-    var davPass: String
-        get() = secret("dPass")
-        set(v) = putSecret("dPass", v)
-    var davDir: String
-        get() = prefs.getString("dDir", "hulian-relay") ?: "hulian-relay"
-        set(v) { prefs.edit().putString("dDir", v).apply() }
+    /** 用哪家网盘存放中转内容：jgy=坚果云（默认，沿用旧设置的存储位置）、infini=InfiniCLOUD、custom=自定义 */
+    var davProvider: String
+        get() = prefs.getString("dProv", "jgy")?.takeIf { p -> DavProviders.all.any { it.id == p } } ?: "jgy"
+        set(v) { prefs.edit().putString("dProv", v).apply() }
+    val davName: String get() = DavProviders.get(davProvider).name
 
-    /** 坚果云配置；没填全返回 null */
+    /** 每家网盘各用一套设置：坚果云沿用原来的键名（升级不丢），其他加后缀 */
+    private fun dk(base: String) = if (davProvider == "jgy") base else base + "_" + davProvider
+
+    var davUrl: String
+        get() = prefs.getString(dk("dUrl"), DavProviders.get(davProvider).defaultUrl) ?: ""
+        set(v) { prefs.edit().putString(dk("dUrl"), v).apply() }
+    var davUser: String
+        get() = prefs.getString(dk("dUser"), "") ?: ""
+        set(v) { prefs.edit().putString(dk("dUser"), v).apply() }
+    var davPass: String
+        get() = secret(dk("dPass"))
+        set(v) = putSecret(dk("dPass"), v)
+    var davDir: String
+        get() = prefs.getString(dk("dDir"), "hulian-relay") ?: "hulian-relay"
+        set(v) { prefs.edit().putString(dk("dDir"), v).apply() }
+
+    /** 当前网盘的配置；没填全返回 null */
     val dav: DavConfig?
         get() {
             val u = davUrl.trim()
