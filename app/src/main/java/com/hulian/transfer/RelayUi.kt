@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -28,13 +29,14 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
-/** 设置页里的“远程中转”：Cloudflare 地址 / 口令 + 坚果云账号，可测试、可在两台手机间复制配置 */
+/** 设置页里的“远程中转”：Cloudflare 地址 / 口令 + 网盘（坚果云 / InfiniCLOUD / 自定义）账号，可测试、可在两台手机间复制配置 */
 @Composable
 fun RelaySettingsCard() {
     val ctx = LocalContext.current
     var on by remember { mutableStateOf(Store.relayOn) }
     var url by remember { mutableStateOf(Store.relayUrl) }
     var secret by remember { mutableStateOf(Store.relaySecret) }
+    var prov by remember { mutableStateOf(Store.davProvider) }
     var davUrl by remember { mutableStateOf(Store.davUrl) }
     var davUser by remember { mutableStateOf(Store.davUser) }
     var davPass by remember { mutableStateOf(Store.davPass) }
@@ -43,6 +45,7 @@ fun RelaySettingsCard() {
     val state by Relay.state.collectAsState()
 
     fun save() {
+        Store.davProvider = prov
         Store.relayOn = on
         Store.relayUrl = url.trim()
         Store.relaySecret = secret.trim()
@@ -50,6 +53,20 @@ fun RelaySettingsCard() {
         Store.davUser = davUser.trim()
         Store.davPass = davPass.trim()
         Store.davDir = davDir.trim().trim('/').ifEmpty { "hulian-relay" }
+        WebDav.forgetDirs()
+        Relay.restart()
+    }
+
+    /** 换一家网盘：先把当前填的存到当前这家名下，再读出新那家之前填过的（每家各记一套，切换不会丢） */
+    fun switchProv(np: String) {
+        if (np == prov) return
+        save()
+        Store.davProvider = np
+        prov = np
+        davUrl = Store.davUrl
+        davUser = Store.davUser
+        davPass = Store.davPass
+        davDir = Store.davDir
         WebDav.forgetDirs()
         Relay.restart()
     }
@@ -71,7 +88,7 @@ fun RelaySettingsCard() {
 
     fun exportCfg(): String {
         val j = JSONObject().put("u", url.trim()).put("s", secret.trim()).put("du", davUrl.trim())
-            .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim())
+            .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim()).put("dv", prov)
         return "HLC1:" + Base64.encodeToString(j.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
@@ -83,6 +100,10 @@ fun RelaySettingsCard() {
             val j = JSONObject(String(Base64.decode(t.removePrefix("HLC1:"), Base64.URL_SAFE), Charsets.UTF_8))
             url = j.getString("u")
             secret = j.getString("s")
+            // 旧版本导出的配置没有网盘类型，一律当坚果云
+            val np = j.optString("dv", "jgy").takeIf { p -> DavProviders.all.any { it.id == p } } ?: "jgy"
+            Store.davProvider = np
+            prov = np
             davUrl = j.getString("du")
             davUser = j.getString("dn")
             davPass = j.getString("dp")
@@ -102,16 +123,24 @@ fun RelaySettingsCard() {
                 Switch(checked = on, onCheckedChange = { on = it; save() })
             }
             Text(
-                "两台手机不在同一个网络时，用 Cloudflare（通知谁在线、有新消息）+ 坚果云（存放加密内容）收发。" +
+                "两台手机不在同一个网络时，用 Cloudflare（通知谁在线、有新消息）+ 网盘（存放加密内容）收发。" +
                     "内容在手机上加密，网盘和 Cloudflare 都看不到。两台手机要填同一份配置，能直连时仍然优先直连。",
                 fontSize = 12.sp, color = Gray
             )
             Text("状态：$state", fontSize = 13.sp, color = if (state.startsWith("已连接")) Color(0xFF2E9E5B) else Gray)
             Field("Cloudflare 地址（https://xxx.workers.dev）", url) { url = it }
             Field("中转口令（部署时设置的 RELAY_SECRET）", secret, secretField = true) { secret = it }
-            Field("坚果云 WebDAV 地址", davUrl) { davUrl = it }
-            Field("坚果云账号（注册邮箱）", davUser) { davUser = it }
-            Field("坚果云应用密码（不是登录密码）", davPass, secretField = true) { davPass = it }
+            val cur = DavProviders.get(prov)
+            Text("网盘", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DavProviders.all.forEach { p ->
+                    FilterChip(selected = prov == p.id, onClick = { switchProv(p.id) }, label = { Text(p.name) })
+                }
+            }
+            Text(cur.note + "两台手机要选同一家、填同一个账号。", fontSize = 12.sp, color = Gray)
+            Field(cur.urlLabel, davUrl) { davUrl = it }
+            Field(cur.userLabel, davUser) { davUser = it }
+            Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { save(); Hub.toast("已保存") }) { Text("保存") }
@@ -119,10 +148,11 @@ fun RelaySettingsCard() {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !busy, onClick = {
-                    test("测试坚果云失败", "坚果云可用（能建文件夹、上传、下载、删除）") {
-                        WebDav.test(Store.dav ?: throw java.io.IOException("坚果云地址、账号、应用密码没有填全"))
+                    val n = Store.davName
+                    test("测试${n}失败", "${n}可用（能建文件夹、上传、下载、删除）") {
+                        WebDav.test(Store.dav ?: throw java.io.IOException("${Store.davName}的地址、账号、密码没有填全"))
                     }
-                }) { Text("测试坚果云") }
+                }) { Text("测试网盘") }
                 OutlinedButton(onClick = {
                     ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("互传配置", exportCfg()))
                     Hub.toast("已复制。里面有口令和网盘密码，只粘贴到自己的设备上")
