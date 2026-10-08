@@ -61,8 +61,12 @@ object Relay {
 
     fun ready(p: Peer) = notReadyReason(p) == null
 
-    /** 远程中转还在出结果：正在连接，或者已连上但还没收到“谁在线”名单。自动连接热点前先等它一小会儿（远程优先） */
-    fun settling() = configured() && (state.value.startsWith("正在连接") || (connected.value && !presence.value))
+    /**
+     * 远程中转还没出结果：还没开始连、正在连，或者已连上但还没收到“谁在线”名单。自动连接热点前先等它一小会儿（远程优先）。
+     * 只有已经连上并拿到名单，或者明确失败（“未连接：…”）了，才算有结果。
+     * 以前只认“正在连接”，App 刚启动、连接还没开始时会误判成“没有远程”，抢先去开 Wi-Fi 和定位
+     */
+    fun settling() = configured() && !(connected.value && presence.value) && !state.value.startsWith("未连接")
 
     // ---------- 连接 ----------
 
@@ -72,6 +76,7 @@ object Relay {
     }
 
     fun restart() {
+        if (!configured()) goodbye()   // 关掉远程中转 / 清空配置：也算下线，先告诉对方
         stop()
         if (!configured()) {
             state.value = if (Store.relayOn) "还没填 Cloudflare 地址或口令" else "未启用"
@@ -89,6 +94,22 @@ object Relay {
         connected.value = false
         presence.value = false
         online.value = emptySet()
+    }
+
+    /**
+     * 本机主动下线（退出 app / 关掉远程中转）：先给还在线的对方各发一条“我下线了”，
+     * 对方收到后立刻把本机标为离线，不用等 Cloudflare 发现连接断开。必须在 stop() 之前调用；
+     * 消息排在关闭帧前面，会先发出去。被系统强杀时来不及发，这种情况只能靠 Cloudflare 自己发现断线
+     */
+    fun goodbye() {
+        val s = sock ?: return
+        if (!connected.value) return
+        try {
+            for (id in online.value) {
+                val p = Hub.peers.value[id]?.takeIf { it.paired } ?: continue
+                s.send(JSONObject().put("op", "notify").put("to", p.id).put("body", JSONObject().put("bye", true)).toString())
+            }
+        } catch (e: Exception) { Hub.log("Relay", e) }
     }
 
     /** 网络变了：别等退避时间，马上重连 */
@@ -194,7 +215,12 @@ object Relay {
                 }
                 "notify" -> {
                     val from = j.getString("from")
-                    val mid = j.getJSONObject("body").getString("mid")
+                    val body = j.getJSONObject("body")
+                    if (body.optBoolean("bye")) {   // 对方主动下线：马上标为离线
+                        online.value = online.value - from
+                        return
+                    }
+                    val mid = body.getString("mid")
                     Hub.scope.launch { receive(from, mid) }
                 }
                 "sent" -> acks.remove(j.optString("mid"))?.complete(j.optBoolean("online"))
