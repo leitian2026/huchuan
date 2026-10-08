@@ -552,6 +552,26 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 }
             }
         }
+        // 远程中转的状态：和上面的热点状态是两回事。直连没连上时也能走远程中转发送，这里单独说清楚现在能不能用、不能用的原因
+        val relayConn by Relay.connected.collectAsState()
+        val relayState by Relay.state.collectAsState()
+        val relayWhy = if (peer != null) Relay.notReadyReason(peer) else null
+        val relayLine: Pair<String, Boolean>? = when {
+            peer == null || !peer.paired || !Store.relayOn -> null
+            peer.online -> null
+            relayWhy != null -> ("远程中转不可用：" + relayWhy) to false
+            !relayConn -> ("远程中转还没连上 Cloudflare：" + relayState) to false
+            peer.id in relayOnline -> "对方在线（远程中转），可以直接发送，不用等热点" to true
+            else -> "对方现在没连上 Cloudflare，发送的内容会先存到网盘，对方上线后自动收取" to true
+        }
+        relayLine?.let { (txt, ok) ->
+            Text(
+                txt,
+                color = if (ok) Color(0xFF2E7D32) else Color(0xFFE65100),
+                fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth().background(Color(0xFFF1F6FC)).padding(horizontal = 12.dp, vertical = 4.dp)
+            )
+        }
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("还没有传输记录", color = Gray, fontSize = 14.sp)
