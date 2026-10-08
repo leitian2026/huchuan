@@ -1,16 +1,34 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.hulian.transfer
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.TransferableContent
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -31,11 +49,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,9 +69,12 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -437,7 +463,7 @@ fun fmtListTime(t: Long): String {
 fun previewOf(m: Msg): String {
     val body = when (m.kind) {
         Kind.TEXT -> m.text
-        Kind.FILE -> "[文件]${m.name}"
+        Kind.FILE -> if (isImageName(m.file.ifEmpty { m.name })) "[图片]" else "[文件]${m.name}"
         Kind.APP -> "[应用]${m.name}"
     }
     return if (m.outgoing && m.state == MsgState.FAILED) "[发送失败] $body" else body
@@ -489,6 +515,34 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
             try { ctx.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { Hub.log("记住文件读取权限", e) }
             Hub.sendFile(peerId, it)
         }
+    }
+
+    // 相册：图片和视频（系统照片选择器，不需要存储权限）
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        uris.forEach { Hub.sendFile(peerId, it) }
+    }
+    // 表情面板里的“+”：从相册批量导入图片 / 动图到表情库
+    val stickerScope = rememberCoroutineScope()
+    val stickerImport = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        if (uris.isNotEmpty()) stickerScope.launch {
+            val rs = withContext(Dispatchers.IO) {
+                uris.map { Stickers.add(ctx, it, Saver.queryMeta(ctx, it).first) }
+            }
+            val ok = rs.count { it == Stickers.Result.ADDED }
+            val dup = rs.count { it == Stickers.Result.EXISTS }
+            val big = rs.count { it == Stickers.Result.TOO_BIG }
+            val bad = rs.count { it == Stickers.Result.FAILED }
+            Hub.toast(buildString {
+                append("已添加 $ok 个表情")
+                if (dup > 0) append("，$dup 个已经有了")
+                if (big > 0) append("，$big 个超过 15MB 没添加")
+                if (bad > 0) append("，$bad 个读取失败")
+            })
+        }
+    }
+    // 文件夹：打成 zip 再发
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) Hub.sendFolder(peerId, uri)
     }
 
     fun onMsgClick(m: Msg) {
@@ -593,28 +647,158 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 }
             }
         }
-        var text by remember { mutableStateOf("") }
+        val tfState = rememberTextFieldState()
         var menuOpen by remember { mutableStateOf(false) }
+        var panel by remember { mutableStateOf(false) }
+        val kb = LocalSoftwareKeyboardController.current
+        val focus = LocalFocusManager.current
+        BackHandler(enabled = panel) { panel = false }
         Row(Modifier.fillMaxWidth().background(Color(0xFFF7F8FA)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box {
                 IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(text = { Text("图片和视频") }, onClick = {
+                        menuOpen = false; Hub.picking = true
+                        mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    })
                     DropdownMenuItem(text = { Text("发送文件") }, onClick = { menuOpen = false; Hub.picking = true; picker.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("发送文件夹") }, onClick = { menuOpen = false; Hub.picking = true; folderPicker.launch(null) })
                     DropdownMenuItem(text = { Text("发送应用") }, onClick = { menuOpen = false; onPickApps() })
                 }
             }
-            TextField(
-                value = text, onValueChange = { text = it },
-                modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
-                placeholder = { Text("输入消息") },
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
-                    focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent
-                )
+            IconButton(onClick = {
+                if (panel) panel = false
+                else { kb?.hide(); focus.clearFocus(); panel = true }
+            }) { Text("🙂", fontSize = 22.sp) }
+            // 用 TextFieldState 版本的输入框：只有它才能接收输入法发来的图片 / 动图（也包括长按“粘贴”的图片）
+            BasicTextField(
+                state = tfState,
+                modifier = Modifier.weight(1f)
+                    .onFocusChanged { if (it.isFocused) panel = false }
+                    .contentReceiver { t -> receiveFromKeyboard(ctx, peerId, t) },
+                textStyle = TextStyle(fontSize = 16.sp, color = Color(0xFF111111)),
+                lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 4),
+                cursorBrush = SolidColor(Blue2),
+                decorator = { inner ->
+                    Box(
+                        Modifier.clip(RoundedCornerShape(22.dp)).background(Color.White)
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        if (tfState.text.isEmpty()) Text("输入消息", color = Gray, fontSize = 16.sp)
+                        inner()
+                    }
+                }
             )
             IconButton(onClick = {
-                if (text.isNotBlank()) { Hub.sendText(peerId, text.trim()); text = "" }
+                val t = tfState.text.toString().trim()
+                if (t.isNotEmpty()) { Hub.sendText(peerId, t); tfState.clearText() }
             }) { Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Blue2) }
+        }
+        if (panel) {
+            StickerPanel(
+                onSend = { f -> Hub.sendLocalFile(peerId, f) },
+                onImport = {
+                    Hub.picking = true
+                    stickerImport.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+            )
+        }
+    }
+}
+
+/** 输入法 / 粘贴送来的图片：马上复制到本机缓存（输入法给的地址是临时授权，回调一结束就失效），再当普通图片发出 */
+private fun receiveFromKeyboard(ctx: Context, peerId: String, t: TransferableContent): TransferableContent? {
+    if (!t.hasMediaType(MediaType.Image)) return t
+    return t.consume { item ->
+        val uri = item.uri ?: return@consume false
+        val f = copyIncomingImage(ctx, uri) ?: return@consume false
+        Hub.sendLocalFile(peerId, f)
+        true
+    }
+}
+
+private fun copyIncomingImage(ctx: Context, uri: Uri): File? {
+    return try {
+        val dir = File(File(ctx.cacheDir, "outbox"), newId()).apply { mkdirs() }
+        val tmp = File(dir, "in.tmp")
+        val limit = 15L * 1024 * 1024
+        var total = 0L
+        ctx.contentResolver.openInputStream(uri)?.use { ins ->
+            FileOutputStream(tmp).use { out ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > limit) { dir.deleteRecursively(); Hub.toast("图片超过 15MB，没有发送"); return null }
+                    out.write(buf, 0, n)
+                }
+            }
+        } ?: run { dir.deleteRecursively(); return null }
+        // 不信任输入法给的类型，直接看文件头判断格式
+        val head = ByteArray(12)
+        val got = tmp.inputStream().use { it.read(head) }
+        val ext = when {
+            got >= 4 && head[0] == 'G'.code.toByte() && head[1] == 'I'.code.toByte() && head[2] == 'F'.code.toByte() -> "gif"
+            got >= 4 && head[0] == 0x89.toByte() && head[1] == 'P'.code.toByte() && head[2] == 'N'.code.toByte() -> "png"
+            got >= 12 && head[0] == 'R'.code.toByte() && head[8] == 'W'.code.toByte() && head[9] == 'E'.code.toByte() -> "webp"
+            got >= 3 && head[0] == 0xFF.toByte() && head[1] == 0xD8.toByte() -> "jpg"
+            else -> null
+        }
+        if (ext == null) { dir.deleteRecursively(); Hub.toast("不支持这种图片格式"); return null }
+        val f = File(dir, "image_${now()}.$ext")
+        if (!tmp.renameTo(f)) { dir.deleteRecursively(); return null }
+        f
+    } catch (e: Throwable) {
+        Hub.log("接收输入法图片", e)
+        Hub.toast("接收输入法发来的图片失败")
+        null
+    }
+}
+
+/** 表情面板：第一格“+”从相册导入，其余是收藏的表情，点一下就发，长按删除 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun StickerPanel(onSend: (File) -> Unit, onImport: () -> Unit) {
+    val ctx = LocalContext.current
+    val list by Stickers.list.collectAsState()
+    var del by remember { mutableStateOf<File?>(null) }
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Stickers.reload(ctx) } }
+    Box(Modifier.fillMaxWidth().height(260.dp).background(Color(0xFFF7F8FA))) {
+        LazyVerticalGrid(
+            GridCells.Adaptive(76.dp),
+            contentPadding = PaddingValues(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            item(key = "add") {
+                Box(
+                    Modifier.size(76.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).clickable(onClick = onImport),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.Add, "从相册添加表情", tint = Gray) }
+            }
+            gridItems(list, key = { it.name }) { f ->
+                Box(
+                    Modifier.size(76.dp).clip(RoundedCornerShape(10.dp)).background(Color.White)
+                        .combinedClickable(onClick = { onSend(f) }, onLongClick = { del = f }),
+                    contentAlignment = Alignment.Center
+                ) {
+                    StickerThumb(f, 68.dp)
+                    DropdownMenu(expanded = del == f, onDismissRequest = { del = null }) {
+                        DropdownMenuItem(text = { Text("删除这个表情") }, onClick = {
+                            del = null
+                            Stickers.remove(ctx, f)
+                        })
+                    }
+                }
+            }
+        }
+        if (list.isEmpty()) {
+            Text(
+                "点 + 从相册添加；也可以长按聊天里的图片，选“添加到表情”",
+                color = Gray, fontSize = 12.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
+            )
         }
     }
 }
@@ -622,6 +806,8 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
 @Composable
 fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
     val out = m.outgoing
+    // 图片读不出来（文件被删、格式系统不支持）时退回文件卡片
+    var imgFailed by remember(m.id) { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
         horizontalArrangement = if (out) Arrangement.End else Arrangement.Start,
@@ -638,6 +824,8 @@ fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
                         )
                     }
                 }
+            } else if (isInlineImage(m) && !imgFailed) {
+                ImageBubble(m, onClick) { imgFailed = true }
             } else {
                 FileCard(m, onClick)
             }
@@ -649,6 +837,46 @@ fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
             }
         }
         if (out) { Spacer(Modifier.width(8.dp)); Avatar("我") }
+    }
+}
+
+/** 聊天里直接显示图片 / 动图；长按可以“添加到表情” */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var menu by remember { mutableStateOf(false) }
+    val pct = if (m.size > 0) (m.done.toFloat() / m.size).coerceIn(0f, 1f) else 0f
+    Box {
+        Column(horizontalAlignment = if (m.outgoing) Alignment.End else Alignment.Start) {
+            Box(Modifier.clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick, onLongClick = { menu = true })) {
+                ChatImage(m, onFail = onFail)
+            }
+            if (m.state == MsgState.SENDING) {
+                Text("发送中 ${(pct * 100).toInt()}%", fontSize = 12.sp, color = Gray, modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("添加到表情") }, onClick = {
+                menu = false
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) { Stickers.add(ctx, Uri.parse(m.uri), m.file.ifEmpty { m.name }) }
+                    Hub.toast(when (r) {
+                        Stickers.Result.ADDED -> "已添加到表情"
+                        Stickers.Result.EXISTS -> "这个表情已经收藏过了"
+                        Stickers.Result.TOO_BIG -> "图片超过 15MB，没有添加"
+                        Stickers.Result.FAILED -> "添加失败：原图已经读取不到了"
+                    })
+                }
+            })
+            if (!m.outgoing) {
+                DropdownMenuItem(text = { Text("用其他应用打开") }, onClick = {
+                    menu = false
+                    Saver.open(ctx, Uri.parse(m.uri), m.file.ifEmpty { m.name })
+                })
+            }
+        }
     }
 }
 
