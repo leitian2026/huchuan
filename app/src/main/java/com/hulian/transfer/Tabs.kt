@@ -254,7 +254,8 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
         peers.values.filter { q.isBlank() || it.name.contains(q, true) }
             .sortedWith(compareByDescending<Peer> { it.online }.thenByDescending { it.lastSeen })
     }
-    val onlineCount = peers.values.count { it.online }
+    val relayOnline by Relay.online.collectAsState()
+    val onlineCount = peers.values.count { it.online || it.id in relayOnline }
     var menuFor by remember { mutableStateOf<String?>(null) }      // 哪一行的“更多”菜单开着
     var confirmDel by remember { mutableStateOf<Peer?>(null) }     // 等用户确认删除的设备
     Column(Modifier.fillMaxSize().background(Color.White)) {
@@ -295,12 +296,12 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
                         Modifier.fillMaxWidth().clickable { onChat(p.id) }.padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Avatar(p.name, p.online, 46.dp)
+                        Avatar(p.name, p.online || p.id in relayOnline, 46.dp)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(p.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
-                                if (!p.paired) "[未配对] 请删除后重新扫码配对" else if (p.online) "[在线] ${p.host}" else "[离线] 上次在线 ${fmtListTime(p.lastSeen)}",
+                                if (!p.paired) "[未配对] 请删除后重新扫码配对" else if (p.online) "[在线] ${p.host}" else if (p.id in relayOnline) "[在线·远程]" else "[离线] 上次在线 ${fmtListTime(p.lastSeen)}",
                                 fontSize = 13.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -386,6 +387,7 @@ fun SettingsContent() {
             }
         }
     }
+    RelaySettingsCard()
     Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("错误记录", fontSize = 16.sp, fontWeight = FontWeight.Bold)
