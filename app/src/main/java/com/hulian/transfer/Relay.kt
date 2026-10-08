@@ -326,7 +326,7 @@ object Relay {
         when (val type = meta.getString("type")) {
             "text" -> {
                 val text = meta.getString("text")
-                if (text.length > Net.MAX_TEXT_LEN) throw IOException("文字太长")
+                if (text.length > Server.MAX_TEXT_LEN) throw IOException("文字太长")
                 Inbox.addText(peer.id, text)
             }
             "file" -> receiveFile(peer, meta, reader)
