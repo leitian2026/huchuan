@@ -27,6 +27,7 @@ object AutoOpen {
     /** 确保 Wi-Fi 开着（不需要连接任何网络）。返回 true 表示现在是开着的；false 表示没打开（没有 root / 拒绝授权） */
     suspend fun wifi(ctx: Context): Boolean {
         if (WifiSwitch.isOn(ctx)) return true
+        if (!Store.hotspotOn) return false   // 自动打开 Wi-Fi 是热点方式的一部分：设置里关了“热点”就不动系统开关
         // 下命令和记录“本 app 打开”要一气呵成：界面中途离开导致协程取消时，也不能出现“开了却没记录、永远不还原”
         val opened = withContext(NonCancellable) {
             val ok = WifiSwitch.set(true)
@@ -42,6 +43,7 @@ object AutoOpen {
     /** 确保系统定位开着。返回 true 表示现在是开着的；false 表示没打开（没有 root / 没授权 / 拒绝授权） */
     suspend fun location(ctx: Context): Boolean {
         if (LocationSwitch.isOn(ctx)) return true
+        if (!Store.hotspotOn) return false   // 同上：热点关了就不自动打开定位
         Store.ownLocation = false   // 现在是关的：以前留下的“本 app 打开”记录已经过期
         return withContext(NonCancellable) {
             val ok = LocationSwitch.setAny(ctx, true)
