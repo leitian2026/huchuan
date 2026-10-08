@@ -36,6 +36,14 @@ object Store {
         get() = prefs.getString("dir", null)
         set(v) { prefs.edit().putString("dir", v).apply() }
 
+    // ---------- 传输方式开关：同一 Wi-Fi / 热点各自独立（远程中转见下面的 relayOn），关掉的方式不会在后台工作 ----------
+    var lanOn: Boolean
+        get() = prefs.getBoolean("lanOn", true)
+        set(v) { prefs.edit().putBoolean("lanOn", v).apply() }
+    var hotspotOn: Boolean
+        get() = prefs.getBoolean("hsOn", true)
+        set(v) { prefs.edit().putBoolean("hsOn", v).apply() }
+
     // ---------- 远程中转：Cloudflare（通知）+ 坚果云 WebDAV（存放加密内容） ----------
     var relayOn: Boolean
         get() = prefs.getBoolean("rOn", false)
