@@ -28,7 +28,7 @@ object Http {
     val ws: OkHttpClient by lazy { client.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
 }
 
-/** 最小的 WebDAV 客户端（坚果云用）：建文件夹、上传、下载、删除、列目录 */
+/** 最小的 WebDAV 客户端（坚果云 / InfiniCLOUD / 其他支持 WebDAV 的网盘通用）：建文件夹、上传、下载、删除、列目录 */
 object WebDav {
     class DavException(val code: Int, msg: String) : IOException(msg)
 
@@ -46,11 +46,12 @@ object WebDav {
     private fun builder(c: DavConfig, u: String): Request.Builder = try {
         Request.Builder().url(u).header("Authorization", Credentials.basic(c.user, c.pass, Charsets.UTF_8))
     } catch (e: IllegalArgumentException) {
-        throw IOException("坚果云地址格式不对：$u（应该像 https://dav.jianguoyun.com/dav/）", e)
+        throw IOException("${Store.davName}地址格式不对：$u（应该像 ${DavProviders.get(Store.davProvider).urlExample}）", e)
     }
 
     private fun why(code: Int): String = when (code) {
-        401 -> "账号或应用密码不对（坚果云要用“应用密码”，不是登录密码；账号是注册邮箱）"
+        401 -> if (Store.davProvider == "jgy") "账号或应用密码不对（坚果云要用“应用密码”，不是登录密码；账号是注册邮箱）"
+            else "账号或密码不对（要用网盘里单独生成的 WebDAV / 应用密码，不是登录密码）"
         403 -> "被网盘拒绝（可能是本月上传 / 下载流量用完了、请求太频繁被限制，或没有写入权限）"
         404 -> "网盘上找不到这个文件或文件夹"
         405 -> "网盘不允许这个操作"
@@ -64,7 +65,7 @@ object WebDav {
     }
 
     private fun fail(op: String, code: Int): Nothing =
-        throw DavException(code, "坚果云${op}失败：" + why(code) + "（HTTP $code）")
+        throw DavException(code, "${Store.davName}${op}失败：" + why(code) + "（HTTP $code）")
 
     private fun call(req: Request, op: String): Response {
         val r = Http.client.newCall(req).execute()
@@ -130,7 +131,7 @@ object WebDav {
         }
     }
 
-    /** 设置页“测试坚果云”：建文件夹 → 上传 → 下载 → 删除，任何一步失败都抛出带原因的异常 */
+    /** 设置页“测试网盘”：建文件夹 → 上传 → 下载 → 删除，任何一步失败都抛出带原因的异常 */
     fun test(c: DavConfig) {
         forgetDirs()
         ensureDir(c)
@@ -139,6 +140,35 @@ object WebDav {
         put(c, name, data.size.toLong()) { it.write(data) }
         val got = get(c, name) { it.readBytes() }
         delete(c, name)
-        if (!got.contentEquals(data)) throw IOException("坚果云读回来的内容和写入的不一致")
+        if (!got.contentEquals(data)) throw IOException("${Store.davName}读回来的内容和写入的不一致")
     }
+}
+
+/** 可选的网盘（WebDAV）。每家各自记一套地址 / 账号 / 密码，切换不会丢 */
+class DavProvider(
+    val id: String, val name: String, val defaultUrl: String, val urlExample: String,
+    val urlLabel: String, val userLabel: String, val passLabel: String, val note: String
+)
+
+object DavProviders {
+    val all = listOf(
+        DavProvider(
+            "jgy", "坚果云", "https://dav.jianguoyun.com/dav/", "https://dav.jianguoyun.com/dav/",
+            "坚果云 WebDAV 地址", "坚果云账号（注册邮箱）", "坚果云应用密码（不是登录密码）",
+            "国内最稳。免费版流量有限：每月上传约 1GB、下载约 3GB。"
+        ),
+        DavProvider(
+            "infini", "InfiniCLOUD", "", "https://xxx.teracloud.jp/dav/",
+            "InfiniCLOUD WebDAV 地址（在 My Page → Apps Connection 里看，每个账号不一样）",
+            "InfiniCLOUD 用户名（User ID）", "Apps Connection 里生成的密码",
+            "免费 20GB，官网称没有传输限制；服务器在日本，先确认你的网络能打开自己的 teracloud.jp 地址。"
+        ),
+        DavProvider(
+            "custom", "自定义", "", "https://example.com/dav/",
+            "WebDAV 地址", "账号", "密码 / 应用密码",
+            "任何支持 WebDAV 的网盘或自己搭的服务（要 https）。"
+        )
+    )
+
+    fun get(id: String): DavProvider = all.firstOrNull { it.id == id } ?: all[0]
 }
