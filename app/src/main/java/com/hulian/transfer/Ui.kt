@@ -143,6 +143,7 @@ fun AppRoot() {
                 delay(2000)
                 val p = Hub.peers.value[id] ?: return@collect
                 if (p.online) return@collect
+                if (id in Relay.online.value && Relay.ready(p)) return@collect   // 直连断了但还能远程联系：留在对话框里
                 if (withContext(Dispatchers.IO) { Net.ping(p) }) {
                     Hub.markOnline(id)
                     return@collect
@@ -500,10 +501,12 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         }
     }
 
+    val relayOnline by Relay.online.collectAsState()
     val title = when {
         peer == null -> "聊天"
         !peer.paired -> peer.name + "（未配对）"
         peer.online -> peer.name
+        peer.id in relayOnline -> peer.name + "（远程）"
         else -> peer.name + "（离线）"
     }
     val linkActive = joinActive || hsPayload != null || groupUp
