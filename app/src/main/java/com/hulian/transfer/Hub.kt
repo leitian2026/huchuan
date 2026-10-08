@@ -325,6 +325,9 @@ object Hub {
 
     /** 逐个探测已记住但显示离线的设备：能连上就立刻标为在线 */
     fun probeKnown() {
+        // 同一 Wi-Fi 关着时，只有热点连接已经建立才探测（热点开关也关着就完全不探测）
+        val hsLink = Store.hotspotOn && (HotspotJoin.active.value || DirectGroup.up.value || HotspotHost.isUp())
+        if (!Store.lanOn && !hsLink) return
         scope.launch {
             _peers.value.values.filter { !it.online && it.paired && it.host.isNotEmpty() }.forEach { p ->
                 launch { if (Net.ping(p)) markOnline(p.id) }
@@ -490,7 +493,9 @@ object Hub {
     private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit) {
         val relayOk = Relay.ready(peer)
         // 同一个 Wi-Fi（或热点已经连上）：局域网直连又快又不占网盘，优先走直连，不管远程中转在不在线
-        val local = peer.online && Net.onLan(peer.host)
+        // 设置里“同一 Wi-Fi”和“热点”都关了：不走任何直连，只剩远程中转
+        val direct = Store.lanOn || Store.hotspotOn
+        val local = direct && peer.online && Net.onLan(peer.host)
         // 其余情况远程中转优先：对方也连着 Cloudflare（双方都能走中转）时先走远程；失败了才用原来的直连 / 热点。
         // 对方没连 Cloudflare 的话走远程它也收不到，所以这种情况不走
         if (!local && relayOk && Relay.connected.value && peer.id in Relay.online.value) {
@@ -499,11 +504,17 @@ object Hub {
                 return
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (!direct) throw IOException("远程中转失败（" + friendlyError(e) + "），同一 Wi-Fi 和热点在设置里都关着", e)
                 if (!peer.online) throw IOException("远程中转失败（" + friendlyError(e) + "），对方也没有直连在线", e)
                 // 对方直连在线：继续往下走原来的方式
             }
         }
         if (relayOk && !peer.online && Relay.connected.value) {
+            Relay.send(peer, h, size, open, onProgress)
+            return
+        }
+        if (!direct) {
+            if (!relayOk) throw IOException("同一 Wi-Fi 和热点在设置里都关着，远程中转也没有设置好，没有可用的传输方式（设置 → 传输方式）")
             Relay.send(peer, h, size, open, onProgress)
             return
         }
