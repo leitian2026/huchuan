@@ -16,9 +16,10 @@ import java.util.concurrent.ConcurrentHashMap
  * 远程中转：两台手机不在同一个网络、也连不上热点时用。
  *
  *  - Cloudflare Worker：只负责“谁在线”和“有新消息”的小通知（WebSocket 长连接，对方上线 / 来消息都是推送，不用轮询）
- *  - 坚果云 WebDAV：存放加密后的内容。发送方上传到“对方的文件夹”，对方收到通知后下载、解密、删除
+ *  - 网盘 WebDAV（坚果云 / InfiniCLOUD 等）：存放加密后的内容。发送方上传到“对方的文件夹”，对方收到通知后下载、解密、删除
  *
  * 内容在手机上用配对时交换的密钥加密（见 RelayCrypto），网盘和 Cloudflare 都看不到。
+
  */
 object Relay {
     /** 给设置页显示的连接状态（出错时写明原因） */
@@ -54,7 +55,7 @@ object Relay {
     fun notReadyReason(p: Peer?): String? = when {
         !Store.relayOn -> "远程中转没有启用（设置 → 远程中转）"
         Store.relayUrl.isBlank() || Store.relaySecret.isBlank() -> "远程中转还没填 Cloudflare 地址或口令"
-        Store.dav == null -> "远程中转还没填坚果云账号"
+        Store.dav == null -> "远程中转还没填${Store.davName}账号"
         p != null && p.rk.isEmpty() -> "这台设备还没有和本机交换过加密密钥（两台手机需要同时在线、直连一次，或者重新扫码配对）"
         else -> null
     }
@@ -158,7 +159,7 @@ object Relay {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connected.value = true
                 backoff = 2000L
-                state.value = if (Store.dav == null) "已连接（但坚果云账号没填，收不到内容）" else "已连接"
+                state.value = if (Store.dav == null) "已连接（但${Store.davName}账号没填，收不到内容）" else "已连接"
                 Hub.scope.launch { sweepInbox() }
             }
 
@@ -262,7 +263,7 @@ object Relay {
         notReadyReason(peer)?.let { throw IOException(it) }
         val s = sock
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
-        val c = Store.dav ?: throw IOException("还没填坚果云账号")
+        val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
         val meta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId)
             .toString().toByteArray(Charsets.UTF_8)
@@ -296,10 +297,10 @@ object Relay {
         acks[mid] = ack
         try {
             val msg = JSONObject().put("op", "notify").put("to", peer.id).put("body", JSONObject().put("mid", mid))
-            if (!s.send(msg.toString())) throw IOException("内容已上传到坚果云，但通知没发出去：和 Cloudflare 的连接刚刚断开")
+            if (!s.send(msg.toString())) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接刚刚断开")
             withTimeout(15_000) { ack.await() }
         } catch (e: TimeoutCancellationException) {
-            throw IOException("内容已上传到坚果云，但 Cloudflare 15 秒内没有确认通知已发出", e)
+            throw IOException("内容已上传到${Store.davName}，但 Cloudflare 15 秒内没有确认通知已发出", e)
         } finally {
             acks.remove(mid)
         }
@@ -313,7 +314,7 @@ object Relay {
             val c = Store.dav ?: return@withContext
             for (n in WebDav.listBins(c, Store.deviceId)) receive(null, n.removeSuffix(".bin"))
         } catch (e: Exception) {
-            Hub.reportOnce("relay-sweep", "检查坚果云里的未收消息失败", friendlyError(e), techDetail(e))
+            Hub.reportOnce("relay-sweep", "检查${Store.davName}里的未收消息失败", friendlyError(e), techDetail(e))
         }
     }
 
@@ -322,7 +323,7 @@ object Relay {
         if (!midPattern.matches(mid)) return@withContext
         if (doneMids.contains(mid) || !processing.add(mid)) return@withContext
         try {
-            val c = Store.dav ?: throw IOException("还没填坚果云账号，收不到远程发来的内容")
+            val c = Store.dav ?: throw IOException("还没填${Store.davName}账号，收不到远程发来的内容")
             val peers = Hub.peers.value.values.filter {
                 it.paired && it.rk.isNotEmpty() && (fromHint == null || it.id == fromHint)
             }
