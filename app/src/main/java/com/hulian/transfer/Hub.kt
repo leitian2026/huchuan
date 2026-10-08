@@ -218,14 +218,42 @@ object Hub {
     }
 
     /** 配对成功：记住对方，以及它的证书指纹；iHost=本机是开二维码的一方（以后没有 Wi-Fi 时由它建热点） */
-    fun addPaired(id: String, name: String, host: String, port: Int, fp: String, iHost: Boolean) {
+    fun addPaired(id: String, name: String, host: String, port: Int, fp: String, iHost: Boolean, rk: String = "") {
         if (id == Store.deviceId) return
         _peers.update { map ->
             val old = map[id]
             val n = name.ifEmpty { old?.name ?: "未知设备" }
-            map + (id to Peer(id, n, host, port, true, now(), fp, iHost))
+            map + (id to Peer(id, n, host, port, true, now(), fp, iHost, rk.ifEmpty { old?.rk ?: "" }))
         }
         persistSoon()
+    }
+
+    fun setRelayKey(id: String, key: String, onlyIfEmpty: Boolean = false) {
+        _peers.update { map ->
+            val p = map[id] ?: return@update map
+            if (onlyIfEmpty && p.rk.isNotEmpty()) map else map + (id to p.copy(rk = key))
+        }
+        persistSoon()
+    }
+
+    private val keySharing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 更新前配对的设备没有中转密钥：两台手机直连在线时，ID 小的一方生成并发给对方（走 TLS 加密的直连通道） */
+    private fun shareRelayKey(id: String) {
+        val p = _peers.value[id] ?: return
+        if (!p.paired || p.rk.isNotEmpty() || Store.deviceId >= id) return
+        if (!keySharing.add(id)) return
+        scope.launch {
+            try {
+                val k = RelayCrypto.newKey()
+                Net.send(p, JSONObject().put("type", "rk").put("key", k), null) { }
+                setRelayKey(id, k)
+            } catch (e: Exception) {
+                log("交换远程中转密钥", e)
+            } finally {
+                keySharing.remove(id)
+            }
+        }
     }
 
     private val verifying = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -264,7 +292,7 @@ object Hub {
                     pairPrompt.value = PairPrompt(id, name.ifEmpty { "对方设备" }, code, false, null)
                 }
             }
-            addPaired(id, r.name.ifEmpty { name }, host, port, r.fp, iHost = false)  // 扫码的一方：以后连对方的热点
+            addPaired(id, r.name.ifEmpty { name }, host, port, r.fp, iHost = false, rk = r.rk)  // 扫码的一方：以后连对方的热点
             true
         } catch (e: Exception) {
             fail("配对失败", friendlyError(e), "对方地址：$host:$port\n" + techDetail(e))
@@ -279,6 +307,7 @@ object Hub {
             val p = map[id] ?: return@update map
             map + (id to p.copy(online = true, lastSeen = now()))
         }
+        shareRelayKey(id)
     }
 
     fun setOffline(id: String) {
@@ -311,6 +340,7 @@ object Hub {
     fun onNetworkChanged() {
         discovery?.restart()
         probeKnown()
+        Relay.kick()
     }
 
     /** 后台巡检：在线设备久未见到就探测一次；定期重试离线设备；热点空闲自动断开 */
@@ -437,7 +467,7 @@ object Hub {
                 }
                 val t = total
                 var last = 0L
-                Net.send(peer, h, open) { done ->
+                transport(peer, h, t, open) { done ->
                     val n = now()
                     if (n - last > 120 || done == t) {
                         last = n
@@ -449,6 +479,28 @@ object Hub {
                 patch(m.id) { it.copy(state = MsgState.FAILED, error = friendlyError(e)) }
             } finally {
                 cleanup()
+            }
+        }
+    }
+
+    /**
+     * 选择传输方式：能直连就直连（快、不耗网盘额度）；对方离线、直连连不上，且远程中转已设置好，就改走 Cloudflare + 坚果云。
+     * 两种都失败时，把两边的原因都告诉用户
+     */
+    private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit) {
+        val relayOk = Relay.ready(peer)
+        if (relayOk && !peer.online && Relay.connected.value) {
+            Relay.send(peer, h, size, open, onProgress)
+            return
+        }
+        try {
+            Net.send(peer, h, open, onProgress)
+        } catch (e: IOException) {
+            if (!relayOk) throw e
+            try {
+                Relay.send(peer, h, size, open, onProgress)
+            } catch (e2: Exception) {
+                throw IOException("直连失败（" + friendlyError(e) + "）；远程中转也失败了（" + friendlyError(e2) + "）", e2)
             }
         }
     }
