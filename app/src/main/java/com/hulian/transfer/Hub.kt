@@ -424,6 +424,57 @@ object Hub {
         doSend(m)
     }
 
+    /** 发送本机缓存里的文件（打包好的文件夹等）：大小已知，直接用 file:// 读取 */
+    fun sendLocalFile(peerId: String, f: java.io.File) {
+        val m = Msg(
+            newId(), peerId, true, Kind.FILE, now(), name = f.name, file = f.name,
+            size = f.length(), state = MsgState.SENDING, uri = Uri.fromFile(f).toString()
+        )
+        addMsg(m)
+        doSend(m)
+    }
+
+    /** 发送文件夹：先打成一个 zip（放在缓存里，保留里面的子目录结构），再当作普通文件发出去 */
+    fun sendFolder(peerId: String, tree: Uri) {
+        scope.launch {
+            try {
+                val root = androidx.documentfile.provider.DocumentFile.fromTreeUri(app, tree)
+                    ?: throw IOException("无法读取这个文件夹")
+                fun hasFile(d: androidx.documentfile.provider.DocumentFile): Boolean =
+                    d.listFiles().any { if (it.isDirectory) hasFile(it) else it.isFile }
+                if (!withContext(Dispatchers.IO) { hasFile(root) }) throw IOException("这个文件夹里没有文件")
+                val outbox = java.io.File(app.cacheDir, "outbox")
+                outbox.listFiles()?.forEach { if (now() - it.lastModified() > 3L * 24 * 3600 * 1000) it.deleteRecursively() }
+                val dir = java.io.File(outbox, newId()).apply { mkdirs() }
+                val base = (root.name ?: "文件夹").replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                val zip = java.io.File(dir, "$base.zip")
+                toast("正在打包文件夹…")
+                withContext(Dispatchers.IO) {
+                    java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(zip))).use { z ->
+                        z.setLevel(1)   // 速度优先：照片、视频本来就压不动
+                        fun add(d: androidx.documentfile.provider.DocumentFile, prefix: String) {
+                            for (f in d.listFiles()) {
+                                val n = f.name ?: continue
+                                if (f.isDirectory) {
+                                    add(f, "$prefix$n/")
+                                } else if (f.isFile) {
+                                    z.putNextEntry(java.util.zip.ZipEntry(prefix + n))
+                                    app.contentResolver.openInputStream(f.uri)?.use { it.copyTo(z) }
+                                    z.closeEntry()
+                                }
+                            }
+                        }
+                        add(root, "")
+                    }
+                }
+                sendLocalFile(peerId, zip)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                report("打包文件夹失败", e)
+            }
+        }
+    }
+
     fun sendApp(peerId: String, e: AppEntry) {
         val m = Msg(
             newId(), peerId, true, Kind.APP, now(), name = e.label, size = e.size,
@@ -454,8 +505,21 @@ object Hub {
                     Kind.FILE -> {
                         val uri = Uri.parse(m.uri)
                         total = m.size
+                        val src: () -> InputStream = { app.contentResolver.openInputStream(uri) ?: throw IOException("无法读取文件") }
+                        open = src
+                        if (total <= 0) {
+                            // 有些来源（云盘、别的 app 分享过来的内容）不告诉文件大小：先复制到缓存量出真实大小，
+                            // 不然对方会按 0 字节接收，文件是不完整的
+                            val tmp = java.io.File.createTempFile("send", ".tmp", app.cacheDir)
+                            cleanup = { tmp.delete() }
+                            withContext(Dispatchers.IO) {
+                                src().use { ins -> tmp.outputStream().use { ins.copyTo(it) } }
+                            }
+                            total = tmp.length()
+                            patch(m.id) { it.copy(size = total) }
+                            open = { tmp.inputStream() }
+                        }
                         h.put("type", "file").put("kind", "file").put("fname", m.name).put("size", total)
-                        open = { app.contentResolver.openInputStream(uri) ?: throw IOException("无法读取文件") }
                     }
                     Kind.APP -> {
                         val e = Apps.find(app, m.pkg) ?: throw IllegalStateException("应用已被卸载")
