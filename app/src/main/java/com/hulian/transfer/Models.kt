@@ -14,7 +14,8 @@ data class Peer(
     val online: Boolean = false,
     val lastSeen: Long = 0L,
     val fp: String = "",        // 配对时记下的对方证书指纹（身份）；为空表示尚未配对，不能收发
-    val iHost: Boolean? = null  // 首次配对时本机是不是开二维码的一方：true=以后由本机建热点，false=本机去连对方的热点；null=旧数据没记录
+    val iHost: Boolean? = null, // 首次配对时本机是不是开二维码的一方：true=以后由本机建热点，false=本机去连对方的热点；null=旧数据没记录
+    val rk: String = ""         // 远程中转用的端到端加密密钥（配对时通过 TLS 直连交换）；为空表示还没交换，不能走中转
 ) {
     val paired: Boolean get() = fp.isNotEmpty()
 }
