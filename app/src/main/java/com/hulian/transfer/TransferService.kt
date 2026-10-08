@@ -68,9 +68,24 @@ class TransferService : Service() {
         return START_STICKY
     }
 
+    /**
+     * 用户从最近任务里划掉 app：很多系统紧接着就会杀进程（状态栏的“正在运行”也随之消失），onDestroy 来不及走。
+     * 这里先给还在线的对方发“下线”通知，让对方马上标为离线。
+     * 如果进程其实没被杀（原生 Android 上服务会继续运行），3 秒后重连一次，Cloudflare 会重新推送在线状态，对方又会看到在线
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Relay.goodbye()
+        Hub.scope.launch {
+            delay(3000)
+            if (Hub.discovery != null) Relay.restart()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         netCb?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (e: Exception) { Hub.log("TransferService", e) } }
         netCb = null
+        Relay.goodbye()
         Relay.stop()
         discovery?.stop()
         discovery = null
