@@ -78,6 +78,7 @@ fun MyQrScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     // 没有 Wi-Fi：优先建 Wi-Fi Direct 群组（扫码方自动加入，没有系统弹窗、不用手动连）；建不出来才退回本地热点
     fun startNoWifi() {
+        if (!Store.hotspotOn) return
         HotspotHost.error.value = null
         p2pQr = null
         scope.launch {
@@ -111,6 +112,10 @@ fun MyQrScreen(onBack: () -> Unit) {
     fun lanPayload(ip: String): String = Pairing.qrBase().put("ip", ip).put("p2p", hotspotCoreGranted(ctx)).toString()
     // 没有 Wi-Fi 时：先补齐权限，再创建临时热点
     fun startHotspot() {
+        if (!Store.hotspotOn) {
+            HotspotHost.error.value = "“热点”在设置里是关着的。已连 Wi-Fi 时请打开“同一 Wi-Fi”，没有 Wi-Fi 时请打开“热点”（设置 → 传输方式）"
+            return
+        }
         HotspotHost.error.value = null
         val miss = hotspotPermsMissing(ctx)
         if (miss.isEmpty()) startNoWifi() else permLauncher.launch(miss.toTypedArray())
@@ -125,11 +130,11 @@ fun MyQrScreen(onBack: () -> Unit) {
             HotspotHost.refreshPayload()
         } else if (HotspotHost.starting) {
             // 热点正在创建，等它出结果即可
-        } else if (ip != null) {
+        } else if (ip != null && Store.lanOn) {
             // 已连 Wi-Fi：直接显示局域网二维码
             lan = lanPayload(ip)
             // 同时建好 Wi-Fi Direct 群组（固定名称密码，对方由二维码里的指纹算出）：对方没连同一个 Wi-Fi 时扫码后自动加入
-            if (hotspotCoreGranted(ctx) && !DirectGroup.up.value && !DirectGroup.starting) {
+            if (Store.hotspotOn && hotspotCoreGranted(ctx) && !DirectGroup.up.value && !DirectGroup.starting) {
                 // Android 12 及以下建群组要求定位开着：关着就自动打开（Android 13+ 不需要，不去动它）
                 if (Build.VERSION.SDK_INT < 33) AutoOpen.location(ctx)
                 DirectGroup.start(ctx, LinkCred.of(Identity.fp)) { msg ->
@@ -145,7 +150,7 @@ fun MyQrScreen(onBack: () -> Unit) {
         while (lan == null && hsPayload == null && hsErr != null) {
             delay(1500)
             val ip = Net.wifiIp()
-            if (ip != null) {
+            if (ip != null && Store.lanOn) {
                 lan = lanPayload(ip)
                 HotspotHost.error.value = null
             }
@@ -182,7 +187,7 @@ fun MyQrScreen(onBack: () -> Unit) {
                 )
                 p2pNote?.let { Text(it, color = Color(0xFFE5484D), fontSize = 12.sp, textAlign = TextAlign.Center) }
                 if (lan != null) {
-                    OutlinedButton(onClick = { DirectGroup.stop(); lan = null; startHotspot() }) { Text("对方没连 Wi-Fi？改用热点") }
+                    if (Store.hotspotOn) OutlinedButton(onClick = { DirectGroup.stop(); lan = null; startHotspot() }) { Text("对方没连 Wi-Fi？改用热点") }
                     Text(
                         "对方手机必须和本机在同一个 Wi-Fi 里才能扫这个码。对方没有连 Wi-Fi 时，点上面的按钮；" +
                             "如果提示创建热点失败，先关掉本机的 Wi-Fi 再重新打开本页",
