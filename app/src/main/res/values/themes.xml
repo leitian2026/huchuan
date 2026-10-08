@@ -1,5 +1,0 @@
-<resources>
-    <style name="Theme.Hulian" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">#EBEEF5</item>
-    </style>
-</resources>
