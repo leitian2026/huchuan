@@ -36,6 +36,48 @@ object Store {
         get() = prefs.getString("dir", null)
         set(v) { prefs.edit().putString("dir", v).apply() }
 
+    // ---------- 远程中转：Cloudflare（通知）+ 坚果云 WebDAV（存放加密内容） ----------
+    var relayOn: Boolean
+        get() = prefs.getBoolean("rOn", false)
+        set(v) { prefs.edit().putBoolean("rOn", v).apply() }
+    var relayUrl: String
+        get() = prefs.getString("rUrl", "") ?: ""
+        set(v) { prefs.edit().putString("rUrl", v).apply() }
+    var relaySecret: String
+        get() = secret("rSec")
+        set(v) = putSecret("rSec", v)
+    var davUrl: String
+        get() = prefs.getString("dUrl", "https://dav.jianguoyun.com/dav/") ?: ""
+        set(v) { prefs.edit().putString("dUrl", v).apply() }
+    var davUser: String
+        get() = prefs.getString("dUser", "") ?: ""
+        set(v) { prefs.edit().putString("dUser", v).apply() }
+    var davPass: String
+        get() = secret("dPass")
+        set(v) = putSecret("dPass", v)
+    var davDir: String
+        get() = prefs.getString("dDir", "hulian-relay") ?: "hulian-relay"
+        set(v) { prefs.edit().putString("dDir", v).apply() }
+
+    /** 坚果云配置；没填全返回 null */
+    val dav: DavConfig?
+        get() {
+            val u = davUrl.trim()
+            val n = davUser.trim()
+            val p = davPass
+            return if (u.isEmpty() || n.isEmpty() || p.isEmpty()) null else DavConfig(u, n, p, davDir.ifBlank { "hulian-relay" })
+        }
+
+    /** 口令类设置用系统密钥库加密后再存 */
+    private fun secret(k: String): String {
+        val s = prefs.getString(k, null)
+        return if (s.isNullOrEmpty()) "" else KeyVault.decrypt(s)
+    }
+
+    private fun putSecret(k: String, v: String) {
+        prefs.edit().putString(k, if (v.isEmpty()) "" else KeyVault.encrypt(v)).apply()
+    }
+
     /** 是否已经做过首次权限说明/申请 */
     var permsAsked: Boolean
         get() = prefs.getBoolean("permsAsked", false)
@@ -105,6 +147,7 @@ object Store {
                 JSONObject().put("id", p.id).put("name", p.name).put("host", p.host)
                     .put("port", p.port).put("seen", p.lastSeen).put("fp", p.fp)
                     .also { o -> p.iHost?.let { o.put("ih", it) } }
+                    .also { o -> if (p.rk.isNotEmpty()) o.put("rk", KeyVault.encrypt(p.rk)) }
             )
         }
         writeAtomic(peerFile, arr.toString())
@@ -117,7 +160,8 @@ object Store {
             Peer(
                 o.getString("id"), o.getString("name"), o.getString("host"), o.getInt("port"),
                 false, o.optLong("seen"), o.optString("fp"),
-                if (o.has("ih")) o.getBoolean("ih") else null
+                if (o.has("ih")) o.getBoolean("ih") else null,
+                if (o.has("rk")) KeyVault.decrypt(o.getString("rk")) else ""
             )
         }.associateBy { it.id }
     } catch (e: Exception) {
