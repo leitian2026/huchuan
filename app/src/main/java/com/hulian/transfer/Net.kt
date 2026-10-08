@@ -28,7 +28,7 @@ import javax.net.ssl.SSLSocket
  * 头：{v, dev, devName, port, type(ping|text|file|pair), ...}
  */
 object Net {
-    class PairResult(val name: String, val fp: String)
+    class PairResult(val name: String, val fp: String, val rk: String)
 
     private fun headerBytes(header: JSONObject): ByteArray {
         header.put("v", 3).put("dev", Store.deviceId).put("devName", Store.deviceName).put("port", Hub.port)
@@ -138,7 +138,7 @@ object Net {
             }
             if (!reply.optBoolean("ok", false)) throw IOException(reply.optString("reason", "对方拒绝了配对"))
             if (reply.optString("id") != peerId) throw IOException("设备不匹配")
-            return PairResult(reply.optString("name"), hostFp)
+            return PairResult(reply.optString("name"), hostFp, reply.optString("rk"))
         } finally {
             pairSock = null
             try { s.close() } catch (e: Exception) { Hub.log("Net", e) }
@@ -337,25 +337,28 @@ object Server {
                         if (text.length > MAX_TEXT_LEN) {
                             no(ch, "文字太长")
                         } else {
-                            Hub.addMsg(
-                                Msg(newId(), pid, false, Kind.TEXT, now(), text = text, read = Hub.isViewing(pid))
-                            )
-                            Notifier.message(pid, text)
+                            Inbox.addText(pid, text)
                             ok(ch)
                         }
                     }
                     "file" -> receiveFile(pid, h, ch)
+                    "rk" -> {
+                        // 更新前配对的设备：对方在直连时把远程中转密钥发过来（走 TLS 加密通道）。只在本机还没有密钥时接受
+                        val k = h.optString("key")
+                        if (RelayCrypto.validKey(k)) Hub.setRelayKey(pid, k, onlyIfEmpty = true)
+                        ok(ch)
+                    }
                     else -> no(ch, "不支持的消息类型")
                 }
             }
         } catch (e: Exception) { Hub.log("Net", e) }
     }
 
-    private const val MAX_TEXT_LEN = 500_000
+    const val MAX_TEXT_LEN = 500_000
 
-    private fun pairReply(ch: Wire, ok: Boolean, reason: String = "") {
+    private fun pairReply(ch: Wire, ok: Boolean, reason: String = "", rk: String = "") {
         val j = JSONObject().put("ok", ok)
-        if (ok) j.put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port)
+        if (ok) j.put("id", Store.deviceId).put("name", Store.deviceName).put("port", Hub.port).put("rk", rk)
         else j.put("reason", reason)
         ch.write(j.toString().toByteArray(Charsets.UTF_8))
         ch.flush()
@@ -406,69 +409,41 @@ object Server {
             pairReply(ch, false, "对方拒绝了配对，或超时没有确认")
             return
         }
-        pairReply(ch, true) // 先告诉对方成功；发不出去就抛异常，本机也不记录
-        Hub.addPaired(id, name, host, port, guestFp, iHost = true)  // 开二维码的一方：以后由本机建热点
+        val rk = RelayCrypto.newKey() // 远程中转的加密密钥：在这条 TLS 通道里交给对方，不经过任何第三方
+        pairReply(ch, true, rk = rk) // 先告诉对方成功；发不出去就抛异常，本机也不记录
+        Hub.addPaired(id, name, host, port, guestFp, iHost = true, rk = rk)  // 开二维码的一方：以后由本机建热点
         Hub.helloCount++
         Hub.hellos.tryEmit(id)
     }
 
     private fun receiveFile(pid: String, h: JSONObject, ch: Wire) {
-        val size = h.getLong("size")
-        if (size < 0) {
-            no(ch, "文件大小无效")
-            return
-        }
-        val free = Space.available()
-        if (free >= 0 && size + Space.RESERVE > free) {
-            Hub.toast("存储空间不足，已拒收文件（" + fmtSize(size) + "）")
-            no(ch, "对方存储空间不足，需要 " + fmtSize(size))
-            return
-        }
-        val fname = Saver.sanitize(Space.safeName(h.getString("fname")))
-        val isApp = h.optString("kind") == "app"
-        val id = newId()
-        val title = if (isApp) h.optString("app").ifEmpty { fname } else fname
-        Hub.addMsg(
-            Msg(
-                id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
-                name = title, file = fname, size = size, state = MsgState.RECEIVING,
-                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
-            )
-        )
-        val saved: Saver.Out = try {
-            Saver.create(Hub.app, fname)
-        } catch (e: Exception) {
-            Hub.log("创建接收文件", e)
-            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "无法保存文件：" + friendlyError(e)) }
-            try { no(ch, "对方无法保存文件") } catch (e: Exception) { Hub.log("Net", e) }
+        val job = try {
+            Inbox.beginFile(pid, h)
+        } catch (e: IOException) {
+            try { no(ch, e.message ?: "对方拒绝接收") } catch (e2: Exception) { Hub.log("Net", e2) }
             return
         }
         try {
             ok(ch) // 告诉对方可以开始发了
             var got = 0L
             var last = 0L
-            saved.stream.use { os ->
-                while (got < size) {
+            job.saved.stream.use { os ->
+                while (got < job.size) {
                     val f = ch.read()
-                    if (f.isEmpty() || got + f.size > size) throw IOException("数据与声明的大小不符")
+                    if (f.isEmpty() || got + f.size > job.size) throw IOException("数据与声明的大小不符")
                     os.write(f)
                     got += f.size
                     val t = now()
                     if (t - last > 120) {
                         last = t
-                        val g = got
-                        Hub.patch(id) { it.copy(done = g) }
+                        Inbox.progress(job, got)
                     }
                 }
             }
-            val u = saved.uri.toString()
-            Hub.patch(id) { it.copy(state = MsgState.DONE, done = size, uri = u) }
-            Notifier.message(pid, (if (isApp) "收到应用：" else "收到文件：") + title)
+            Inbox.finishFile(pid, job)
             ok(ch)
         } catch (e: Exception) {
-            Saver.delete(Hub.app, saved.uri)
-            Hub.log("接收文件", e)
-            Hub.patch(id) { it.copy(state = MsgState.FAILED, error = "接收中断：" + friendlyError(e)) }
+            Inbox.failFile(job, e)
         }
     }
 }
