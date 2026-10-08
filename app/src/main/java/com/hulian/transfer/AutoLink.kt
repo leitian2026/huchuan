@@ -252,7 +252,7 @@ object AutoLink {
         if (target != peerId) role = null
         target = peerId
         openAt = now()
-        st(LinkKind.WORK, "正在准备连接…")
+        if (Store.hotspotOn) st(LinkKind.WORK, "正在准备连接…") else status.value = null
         registerReceiver(app)
         if (keeper?.isActive != true) {
             try { app.startService(Intent(app, ExitWatcher::class.java)) } catch (e: Exception) { Hub.log("AutoLink", e) }
@@ -363,10 +363,9 @@ object AutoLink {
     private fun step(app: Context) {
         val id = target ?: run { status.value = null; return }
         val t = Hub.peers.value[id]?.takeIf { it.paired } ?: run { status.value = null; return }
-        // 设置里关了“热点”：不自动开 Wi-Fi / 定位 / 热点，也不去连对方的热点
+        // 设置里关了“热点”：不自动开 Wi-Fi / 定位 / 热点，也不去连对方的热点；顶栏不显示任何自动连接状态
         if (!Store.hotspotOn) {
-            if (t.online) st(LinkKind.OK, "已连接：${t.name}")
-            else st(LinkKind.WARN, "“热点”在设置里是关着的，不会自动连接（设置 → 传输方式）")
+            status.value = null
             return
         }
         // 二维码配对用的临时热点 / 手动连接还留着：以前这里直接什么都不做、状态条也不显示，
