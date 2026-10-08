@@ -30,6 +30,7 @@ class Discovery(ctx: Context) {
 
     @Synchronized
     fun start() {
+        if (!Store.lanOn) return   // 设置里关了“同一 Wi-Fi”：不做 mDNS / UDP 广播发现
         val info = NsdServiceInfo().apply {
             serviceName = myService
             serviceType = type
