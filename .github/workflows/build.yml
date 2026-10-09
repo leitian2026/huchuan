@@ -1,6 +1,6 @@
-name: Build Debug APK
+name: Build Release APK
 
-# 只能手动触发：GitHub 仓库 → Actions → Build Debug APK → Run workflow（推送代码不会自动构建）
+# 只能手动触发：GitHub 仓库 → Actions → Build Release APK → Run workflow（推送代码不会自动构建）
 on:
   workflow_dispatch:
 
@@ -17,8 +17,13 @@ jobs:
         with:
           gradle-version: 8.9
       - name: Build
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle assembleRelease --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: hulian-debug-${{ github.run_number }}
-          path: app/build/outputs/apk/debug/*.apk
+          name: hulian-release-${{ github.run_number }}
+          path: app/build/outputs/apk/release/*.apk
+      # 混淆映射表：线上崩溃堆栈反混淆用
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hulian-mapping-${{ github.run_number }}
+          path: app/build/outputs/mapping/release/mapping.txt
