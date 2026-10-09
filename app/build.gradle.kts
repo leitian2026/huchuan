@@ -19,9 +19,15 @@ android {
         versionName = "0.3.$buildNo"
     }
 
-    // 固定的调试签名：每次 CI 构建签名一致，才能直接覆盖安装升级
+    // 固定签名：每次 CI 构建签名一致，才能直接覆盖安装升级（发布版沿用同一个 keystore，所以能覆盖之前装的调试版）
     signingConfigs {
         getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+        create("release") {
             storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
@@ -31,8 +37,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true        // R8 代码压缩 + 混淆
+            isShrinkResources = true      // 去掉未使用的资源
+            isDebuggable = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
