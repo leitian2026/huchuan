@@ -120,10 +120,10 @@ object Relay {
 
     private fun wsUrl(): String {
         val u = Store.relayUrl.trim().trimEnd('/')
+        UrlRules.relayError(u)?.let { throw IllegalArgumentException(it) }   // 不允许 http:// / ws:// 明文
         val base = when {
             u.startsWith("https://") -> "wss://" + u.removePrefix("https://")
-            u.startsWith("http://") -> "ws://" + u.removePrefix("http://")
-            u.startsWith("wss://") || u.startsWith("ws://") -> u
+            u.startsWith("wss://") -> u
             else -> "wss://$u"
         }
         return "$base/ws"
@@ -153,7 +153,7 @@ object Relay {
                 .header("X-Device", Store.deviceId)
                 .build()
         } catch (e: IllegalArgumentException) {
-            return@coroutineScope "Cloudflare 地址格式不对：" + Store.relayUrl
+            return@coroutineScope UrlRules.relayError(Store.relayUrl) ?: ("Cloudflare 地址格式不对：" + Store.relayUrl)
         }
         val s = Http.ws.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -241,7 +241,8 @@ object Relay {
         val raw = Store.relayUrl.trim().trimEnd('/')
         if (raw.isEmpty()) throw IOException("还没填 Cloudflare 地址")
         if (Store.relaySecret.isEmpty()) throw IOException("还没填中转口令")
-        val base = if (raw.startsWith("http")) raw else "https://$raw"
+        UrlRules.relayError(raw)?.let { throw IOException(it) }
+        val base = if (raw.startsWith("https://", ignoreCase = true)) raw else "https://$raw"
         val req = try {
             Request.Builder().url("$base/test").header("X-Relay-Secret", Store.relaySecret).build()
         } catch (e: IllegalArgumentException) {
@@ -350,6 +351,21 @@ object Relay {
             }
             markDone(mid)
             try { WebDav.delete(c, path) } catch (e: Exception) { Hub.log("删除已收到的中转文件", e) }
+        } catch (e: NoKeyException) {
+            markDone(mid)
+            if (fromHint == null) {
+                // 扫描网盘时已经试过本机所有已配对设备的密钥，第一块完整数据都解不开：多半是重新配对前留下的旧内容，
+                // 旧密钥已经没了，以后也不可能解开。删掉它，免得每次重连都再扫到、再弹一次框；只记入错误记录，不打扰
+                Hub.log("远程中转：网盘里有一条解不开的旧内容，已删除（$mid）", e)
+                try {
+                    Store.dav?.let { WebDav.delete(it, "${Store.deviceId}/$mid.bin") }
+                } catch (d: Exception) {
+                    Hub.log("删除解不开的中转文件", d)
+                }
+            } else {
+                // 收到的是对方刚发来的通知，对方等着这条消息：仍然提示，但不删文件（下次扫描网盘时再判断）
+                Hub.report("远程接收失败", e, "消息：$mid")
+            }
         } catch (e: Exception) {
             markDone(mid) // 失败的也不要在本次运行里反复重试
             Hub.report("远程接收失败", e, "消息：$mid")
@@ -358,10 +374,13 @@ object Relay {
         }
     }
 
+    /** 所有候选密钥都解不开消息头（和下载中断、文件损坏这类错误区分开：那些不会走到这里） */
+    private class NoKeyException(msg: String) : IOException(msg)
+
     private fun handleStream(peers: List<Peer>, ins: InputStream) {
         val reader = RelayCrypto.Reader(ins)
         val (idx, metaBytes) = reader.open(peers.map { RelayCrypto.key(it.rk) })
-            ?: throw IOException("无法解密：密钥对不上（对方用的不是和本机交换过的密钥，或者这不是发给本机的内容）")
+            ?: throw NoKeyException("无法解密：密钥对不上（对方用的不是和本机交换过的密钥，或者这不是发给本机的内容）")
         val peer = peers[idx]
         val meta = JSONObject(String(metaBytes, Charsets.UTF_8))
         if (meta.optString("from") != peer.id) throw IOException("来源校验失败：消息里的发送者和密钥对应的设备不一致")
