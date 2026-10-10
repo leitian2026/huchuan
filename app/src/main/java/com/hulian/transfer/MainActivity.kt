@@ -102,8 +102,21 @@ class MainActivity : ComponentActivity() {
             }
             else -> return null
         }
+        // 分享入口对所有 app 开放：只收 content:// 的文件。file:// 可以指向本 app 的私有目录（密钥、设置），
+        // 指向本 app 自己的 content 地址同理，一律拒绝，免得别的 app 诱导把私有数据当成“分享的文件”发出去
+        val total = uris.size
+        uris.retainAll { shareUriAllowed(it) }
+        if (total > uris.size) Hub.toast("已忽略 ${total - uris.size} 个不安全的分享来源（file:// 或本程序自己的文件）")
         val text = i.getStringExtra(Intent.EXTRA_TEXT)
         if (uris.isEmpty() && text.isNullOrBlank()) return null
         return Share(uris, if (uris.isEmpty()) text else null)
+    }
+
+    private fun shareUriAllowed(u: Uri): Boolean {
+        if (!"content".equals(u.scheme, ignoreCase = true)) return false
+        val auth = u.authority.orEmpty().lowercase()
+        // 本 app 自己提供的 content 地址（authority 以包名开头）不接受分享进来
+        if (auth == packageName.lowercase() || auth.startsWith(packageName.lowercase() + ".")) return false
+        return true
     }
 }
