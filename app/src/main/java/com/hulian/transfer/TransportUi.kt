@@ -26,39 +26,26 @@ fun TransportSettingsCard() {
     var lan by remember { mutableStateOf(Store.lanOn) }
     var hs by remember { mutableStateOf(Store.hotspotOn) }
 
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("传输方式", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("需要哪个打开哪个。关掉的方式不会在后台工作，也不会影响其他方式；远程中转在下面单独设置。", fontSize = 12.sp, color = Gray)
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("同一 Wi-Fi", fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    Text("两台手机连着同一个 Wi-Fi 时，自动发现并直连。关闭后不再做局域网发现，扫码配对也不用 Wi-Fi 地址。", fontSize = 12.sp, color = Gray)
-                }
-                Switch(checked = lan, onCheckedChange = {
-                    lan = it
-                    Store.lanOn = it
-                    Hub.discovery?.restart()
-                    Hub.probeKnown()
-                })
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("热点", fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    Text("没有共同 Wi-Fi 时，点开对话框自动用 Wi-Fi Direct / 临时热点连接，也用于扫码配对。关闭后不会自动开 Wi-Fi、定位或热点。", fontSize = 12.sp, color = Gray)
-                }
-                Switch(checked = hs, onCheckedChange = {
-                    hs = it
-                    Store.hotspotOn = it
-                    if (it) AutoLink.kick() else AutoLink.hotspotDisabled()
-                })
-            }
-
-            if (!lan && !hs) {
-                Text("同一 Wi-Fi 和热点都关着，现在只有远程中转能传。", fontSize = 12.sp, color = Color(0xFFE5484D))
-            }
+    SettingsCard {
+        CardTitle(
+            "传输方式",
+            help = "需要哪个打开哪个。关掉的方式不会在后台工作，也不会影响其他方式；远程中转在下面单独设置。\n\n" +
+                "同一 Wi-Fi：两台手机连着同一个 Wi-Fi 时，自动发现并直连。关闭后不再做局域网发现，扫码配对也不用 Wi-Fi 地址。\n\n" +
+                "热点：没有共同 Wi-Fi 时，点开对话框自动用 Wi-Fi Direct / 临时热点连接，也用于扫码配对。关闭后不会自动开 Wi-Fi、定位或热点。"
+        )
+        SwitchRow("同一 Wi-Fi", lan, "同一个 Wi-Fi 下自动发现并直连") {
+            lan = it
+            Store.lanOn = it
+            Hub.discovery?.restart()
+            Hub.probeKnown()
+        }
+        SwitchRow("热点", hs, "没有共同 Wi-Fi 时用 Wi-Fi Direct / 临时热点") {
+            hs = it
+            Store.hotspotOn = it
+            if (it) AutoLink.kick() else AutoLink.hotspotDisabled()
+        }
+        if (!lan && !hs) {
+            Text("同一 Wi-Fi 和热点都关着，现在只有远程中转能传。", fontSize = 12.sp, color = Color(0xFFE5484D))
         }
     }
 }
