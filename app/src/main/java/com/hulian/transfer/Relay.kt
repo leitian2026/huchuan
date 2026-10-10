@@ -201,6 +201,7 @@ object Relay {
                 else -> "Cloudflare 返回了 HTTP ${r.code}"
             }
         }
+        netHint(t)?.let { return it + "（" + t.javaClass.simpleName + "）" }   // DNS 被改 / 握手被掐：别再说成“配对身份不一致”
         return friendlyError(t) + "（" + t.javaClass.simpleName + "）"
     }
 
@@ -246,7 +247,12 @@ object Relay {
         } catch (e: IllegalArgumentException) {
             throw IOException("Cloudflare 地址格式不对：$raw", e)
         }
-        Http.client.newCall(req).execute().use { r ->
+        val resp = try {
+            Http.client.newCall(req).execute()
+        } catch (e: IOException) {
+            throw IOException(netHint(e) ?: throw e, e)
+        }
+        resp.use { r ->
             when (r.code) {
                 200 -> Unit
                 401 -> throw IOException("口令不对（401）：手机里的“中转口令”要和部署时设置的 RELAY_SECRET 完全一样")
