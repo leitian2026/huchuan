@@ -59,6 +59,12 @@ object NetDns : Dns {
                 if (err == null) err = "Host 映射第 ${i + 1} 行：域名不对"
                 return@forEachIndexed
             }
+            // 一行只有 IP / 写成了“IP 域名”（hosts 文件的顺序）：给明确提示，别笼统说格式不对
+            if (literal(parts[0].trimEnd(':')) != null) {
+                if (err == null) err = if (parts.size == 1) "Host 映射第 ${i + 1} 行：这一行只有 IP，前面要写域名（格式：域名 IP）"
+                else "Host 映射第 ${i + 1} 行：开头应该是域名，不是 IP（顺序是：域名 IP，和 hosts 文件相反）"
+                return@forEachIndexed
+            }
             val ips = parts.drop(1).map { literal(it) }
             if (ips.isEmpty()) {
                 if (err == null) err = "Host 映射第 ${i + 1} 行：$host 后面没有 IP"
@@ -73,6 +79,30 @@ object NetDns : Dns {
         val p = Parsed(map, err)
         hostsCache = text to p
         return p
+    }
+
+    /** DoH 地址的格式错误（每行都要是 https:// 地址）；没问题返回 null。设置页保存前检查 */
+    fun dohError(text: String): String? {
+        text.lines().map { it.trim() }.filter { it.isNotEmpty() }.forEachIndexed { i, line ->
+            val u = line.toHttpUrlOrNull()
+            if (u == null || u.scheme != "https") return "DoH 第 ${i + 1} 行不对：要以 https:// 开头，像 https://域名/路径"
+        }
+        return null
+    }
+
+    /**
+     * 提醒（不阻止保存）：DoH 服务器自己的域名如果没有 Host 映射，解析它就得先用系统 DNS，
+     * 而被劫持的正是系统 DNS，DoH 一开始就连不上。DoH 地址里直接写 IP 的不需要映射。没问题返回 null
+     */
+    fun dohWarning(dohText: String, hostsText: String): String? {
+        val map = parseHosts(hostsText).map
+        for (line in dohText.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
+            val u = line.toHttpUrlOrNull() ?: continue
+            val h = u.host.lowercase()
+            if (literal(h) != null) continue
+            if (map[h].isNullOrEmpty()) return "DoH 服务器 $h 没有 Host 映射，解析它要先走系统 DNS，可能被劫持。请在 Host 映射里加一行：$h IP"
+        }
+        return null
     }
 
     /** 设置页保存后调用：清缓存，并断开旧连接，下次连接按新设置解析 */
