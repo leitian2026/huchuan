@@ -45,6 +45,7 @@ object WebDav {
     private fun url(c: DavConfig, sub: String) = root(c) + if (sub.isEmpty()) "" else "/" + sub.trimStart('/')
 
     private fun builder(c: DavConfig, u: String): Request.Builder = try {
+        UrlRules.davError(u, Store.davName)?.let { throw IOException(it) }   // 账号密码只走 https
         Request.Builder().url(u).header("Authorization", Credentials.basic(c.user, c.pass, Charsets.UTF_8))
     } catch (e: IllegalArgumentException) {
         throw IOException("${Store.davName}地址格式不对：$u（应该像 ${DavProviders.get(Store.davProvider).urlExample}）", e)
