@@ -342,7 +342,7 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
 fun MeTab() {
     Column(
         Modifier.fillMaxSize().background(ChatBg).verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) { SettingsContent() }
 }
 
@@ -379,32 +379,29 @@ fun SettingsContent() {
         } catch (e: Exception) { Hub.log("读取版本号", e); "（读取失败）" }
     }
 
-    Text("当前版本：$ver", fontSize = 13.sp, color = Gray)
+    Text("当前版本：$ver", fontSize = 12.sp, color = Gray)
     OutlinedTextField(
         value = name, onValueChange = { name = it; if (it.isNotBlank()) Store.deviceName = it.trim() },
         label = { Text("本机名称（对方看到的名字）") }, singleLine = true, modifier = Modifier.fillMaxWidth()
     )
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("接收文件保存位置", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text(dirLabel, fontSize = 14.sp)
-            Text("选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。", fontSize = 12.sp, color = Gray)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { treePicker.launch(null) }) { Text("选择文件夹") }
-                if (dir != null) OutlinedButton(onClick = { Store.saveDir = null; dir = null }) { Text("恢复默认") }
-            }
+    SettingsCard {
+        CardTitle(
+            "接收文件保存位置",
+            help = "选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。"
+        )
+        Text(dirLabel, fontSize = 14.sp)
+        Row(horizontalArrangement = BtnRowGap) {
+            ActionBtn("选择文件夹", filled = true) { treePicker.launch(null) }
+            if (dir != null) ActionBtn("恢复默认") { Store.saveDir = null; dir = null } else EmptySlot()
         }
     }
     TransportSettingsCard()
     RelaySettingsCard()
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("错误记录", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。", fontSize = 12.sp, color = Gray)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }) { Text("查看") }
-                OutlinedButton(onClick = { Hub.clearErrorLog(); Hub.toast("已清空") }) { Text("清空") }
-            }
+    SettingsCard {
+        CardTitle("错误记录", help = "程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。")
+        Row(horizontalArrangement = BtnRowGap) {
+            ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }
+            ActionBtn("清空") { Hub.clearErrorLog(); Hub.toast("已清空") }
         }
     }
 }
