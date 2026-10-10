@@ -85,6 +85,20 @@ object Store {
             return if (u.isEmpty() || n.isEmpty() || p.isEmpty()) null else DavConfig(u, n, p, davDir.ifBlank { "hulian-relay" })
         }
 
+    // ---------- 公网域名解析（防 DNS 劫持）：自建 DoH + Host 映射，见 NetDns ----------
+    /** 自建 DoH 地址，每行一个，按顺序试。地址里常带随机路径，等于口令，所以加密保存 */
+    var dohUrl: String
+        get() = secret("dnsDoh")
+        set(v) = putSecret("dnsDoh", v)
+    /** Host 映射：每行 “域名 IP [IP…]”，命中就不查 DNS */
+    var hostsText: String
+        get() = prefs.getString("dnsHosts", "") ?: ""
+        set(v) { prefs.edit().putString("dnsHosts", v).apply() }
+    /** DoH 全部失败时是否回退到系统 DNS（默认不回退：回退等于把可能被劫持的系统 DNS 放回来） */
+    var dohFallback: Boolean
+        get() = prefs.getBoolean("dnsFb", false)
+        set(v) { prefs.edit().putBoolean("dnsFb", v).apply() }
+
     /** 口令类设置用系统密钥库加密后再存 */
     private fun secret(k: String): String {
         val s = prefs.getString(k, null)
