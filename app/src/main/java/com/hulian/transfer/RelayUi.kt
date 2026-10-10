@@ -12,6 +12,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -129,35 +130,42 @@ fun RelaySettingsCard() {
         }
     }
 
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("远程中转", fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Switch(checked = on, onCheckedChange = { on = it; save() })
-            }
+    val cur = DavProviders.get(prov)
+    val dohCount = doh.lines().count { it.isNotBlank() }
+    val hostCount = hosts.lines().count { it.substringBefore('#').isNotBlank() }
+    val dnsSummary = if (dohCount == 0 && hostCount == 0) "未配置" else "DoH $dohCount 个 · Host $hostCount 条"
+    val hostsErr = NetDns.parseHosts(hosts).error
+    val dohErr = NetDns.dohError(doh)
+    val dohWarn = if (dohErr == null && hostsErr == null) NetDns.dohWarning(doh, hosts) else null
+
+    /** 保存前的检查：中转和网盘只许 https；DoH、Host 映射格式要对。返回第一个错误，没有返回 null */
+    fun settingsError(): String? =
+        UrlRules.relayError(url) ?: UrlRules.davError(davUrl, DavProviders.get(prov).name) ?: dohErr ?: hostsErr
+
+    SettingsCard {
+        CardTitle(
+            "远程中转",
+            help = "两台手机不在同一个网络时，用 Cloudflare（通知谁在线、有新消息）+ 网盘（存放加密内容）收发。" +
+                "内容在手机上加密，网盘和 Cloudflare 都看不到。两台手机要填同一份配置，能直连时仍然优先直连。",
+            trailing = { Switch(checked = on, onCheckedChange = { on = it; save() }) }
+        )
+        Text("状态：$state", fontSize = 13.sp, color = if (state.startsWith("已连接")) Color(0xFF2E9E5B) else Gray)
+        Field("Cloudflare 地址（域名或 xxx.workers.dev）", url) { url = it }
+        Field("中转口令（RELAY_SECRET）", secret, secretField = true) { secret = it }
+
+        FoldSection("域名解析", dnsSummary) {
             Text(
-                "两台手机不在同一个网络时，用 Cloudflare（通知谁在线、有新消息）+ 网盘（存放加密内容）收发。" +
-                    "内容在手机上加密，网盘和 Cloudflare 都看不到。两台手机要填同一份配置，能直连时仍然优先直连。",
+                "先查 Host 映射，再问自建 DoH，都不填用系统 DNS。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
                 fontSize = 12.sp, color = Gray
             )
-            Text("状态：$state", fontSize = 13.sp, color = if (state.startsWith("已连接")) Color(0xFF2E9E5B) else Gray)
-            Field("Cloudflare 地址（https://xxx.workers.dev）", url) { url = it }
-            Field("中转口令（部署时设置的 RELAY_SECRET）", secret, secretField = true) { secret = it }
-            Text("域名解析（防 DNS 劫持）", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "先查 Host 映射，查不到再问自建 DoH，两项都不填就用系统 DNS。对 Cloudflare 和网盘都生效。" +
-                    "注意：DoH 只能防 DNS 被改，握手时的域名（SNI）仍然是明文。",
-                fontSize = 12.sp, color = Gray
-            )
-            Field("自建 DoH 地址（https://…，可填多个，一行一个）", doh, lines = 2) { doh = it }
-            Field("Host 映射（每行：域名 IP [IP…]，可填多个 IP）", hosts, lines = 3) { hosts = it }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("DoH 失败时回退到系统 DNS", fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Switch(checked = dohFb, onCheckedChange = { dohFb = it })
-            }
-            Text("默认关闭：回退等于把可能被劫持的系统 DNS 放回来；关闭时 DoH 不可用就连不上。", fontSize = 12.sp, color = Gray)
-            val cur = DavProviders.get(prov)
-            Text("网盘", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
+            Field("Host 映射（每行：域名 IP [IP…]）", hosts, lines = 3) { hosts = it }
+            (dohErr ?: hostsErr)?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
+            dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
+            SwitchRow("DoH 失败时回退系统 DNS", dohFb, "默认关：关闭时 DoH 不可用就连不上；打开等于放回可能被劫持的系统 DNS") { dohFb = it }
+        }
+
+        FoldSection("网盘", cur.name + " · " + davDir, startOpen = davUser.isBlank() || davPass.isBlank()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DavProviders.all.forEach { p ->
                     FilterChip(selected = prov == p.id, onClick = { switchProv(p.id) }, label = { Text(p.name) })
@@ -168,43 +176,43 @@ fun RelaySettingsCard() {
             Field(cur.userLabel, davUser) { davUser = it }
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val err = NetDns.parseHosts(hosts).error
-                    if (err != null) Hub.toast(err) else { save(); Hub.toast("已保存") }
-                }) { Text("保存") }
-                OutlinedButton(enabled = !busy, onClick = { test("测试 Cloudflare 失败", "Cloudflare 可用，口令正确") { Relay.testWorker() } }) { Text("测试 Cloudflare") }
+        }
+
+        HorizontalDivider(color = Color(0xFFEDEFF3))
+        Row(horizontalArrangement = BtnRowGap) {
+            ActionBtn("保存", filled = true) {
+                val err = settingsError()
+                if (err != null) Hub.toast(err) else { save(); Hub.toast(if (dohWarn != null) "已保存。注意：$dohWarn" else "已保存") }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(enabled = !busy, onClick = {
-                    val err = NetDns.parseHosts(hosts).error
-                    val h = hostOf(url)
-                    if (err != null) { Hub.toast(err); return@OutlinedButton }
-                    if (h.isEmpty()) { Hub.toast("先填 Cloudflare 地址"); return@OutlinedButton }
-                    save()
-                    busy = true
-                    dnsInfo = "正在解析 $h …"
-                    Hub.scope.launch {
-                        dnsInfo = try { NetDns.explain(h) } catch (e: Exception) { "失败：" + friendlyError(e) }
-                        busy = false
-                    }
-                }) { Text("测试解析") }
+            ActionBtn("复制配置") {
+                ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("互传配置", exportCfg()))
+                Hub.toast("已复制。里面有口令、网盘密码和 DoH 地址，只粘贴到自己的设备上")
             }
-            if (dnsInfo.isNotEmpty()) Text(dnsInfo, fontSize = 12.sp, color = Gray)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(enabled = !busy, onClick = {
-                    val n = Store.davName
-                    test("测试${n}失败", "${n}可用（能建文件夹、上传、下载、删除）") {
-                        WebDav.test(Store.dav ?: throw java.io.IOException("${Store.davName}的地址、账号、密码没有填全"))
-                    }
-                }) { Text("测试网盘") }
-                OutlinedButton(onClick = {
-                    ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("互传配置", exportCfg()))
-                    Hub.toast("已复制。里面有口令、网盘密码和 DoH 地址，只粘贴到自己的设备上")
-                }) { Text("复制配置") }
-                OutlinedButton(onClick = { importCfg() }) { Text("粘贴配置") }
+            ActionBtn("粘贴配置") { importCfg() }
+        }
+        Row(horizontalArrangement = BtnRowGap) {
+            ActionBtn("测试中转", enabled = !busy) { test("测试 Cloudflare 失败", "Cloudflare 可用，口令正确") { Relay.testWorker() } }
+            ActionBtn("测试网盘", enabled = !busy) {
+                val n = Store.davName
+                test("测试${n}失败", "${n}可用（能建文件夹、上传、下载、删除）") {
+                    WebDav.test(Store.dav ?: throw java.io.IOException("${Store.davName}的地址、账号、密码没有填全"))
+                }
+            }
+            ActionBtn("测试解析", enabled = !busy) {
+                val err = settingsError()
+                val h = hostOf(url)
+                if (err != null) { Hub.toast(err); return@ActionBtn }
+                if (h.isEmpty()) { Hub.toast("先填 Cloudflare 地址"); return@ActionBtn }
+                save()
+                busy = true
+                dnsInfo = "正在解析 $h …"
+                Hub.scope.launch {
+                    dnsInfo = try { NetDns.explain(h) } catch (e: Exception) { "失败：" + friendlyError(e) }
+                    busy = false
+                }
             }
         }
+        if (dnsInfo.isNotEmpty()) Text(dnsInfo, fontSize = 12.sp, color = Gray)
     }
 }
 
