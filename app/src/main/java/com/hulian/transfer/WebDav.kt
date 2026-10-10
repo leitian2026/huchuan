@@ -19,6 +19,7 @@ class DavConfig(val url: String, val user: String, val pass: String, val dir: St
 
 object Http {
     val client: OkHttpClient = OkHttpClient.Builder()
+        .dns(NetDns)   // Host 映射 → 自建 DoH → 系统 DNS，见 NetDns
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
