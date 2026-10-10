@@ -67,4 +67,29 @@ public class NetDnsTest {
     public void 非网络类错误返回null() {
         assertNull(NetDnsKt.netHint(new java.io.IOException("口令不对")));
     }
+
+    @Test
+    public void 只有IP的行_或写成IP在前_给明确提示() {
+        NetDns.Parsed a = NetDns.INSTANCE.parseHosts("162.159.152.2");
+        assertTrue(a.getError().contains("只有 IP"));
+        NetDns.Parsed b = NetDns.INSTANCE.parseHosts("162.159.152.2 www.example.com");
+        assertTrue(b.getError().contains("顺序是：域名 IP"));
+        assertTrue(a.getMap().isEmpty() && b.getMap().isEmpty());
+    }
+
+    @Test
+    public void DoH域名没有映射要提醒_有映射或写IP不提醒() {
+        String doh = "https://www.example.org/token";
+        assertNotNull(NetDns.INSTANCE.dohWarning(doh, ""));
+        assertNull(NetDns.INSTANCE.dohWarning(doh, "www.example.org 1.2.3.4"));
+        assertNull(NetDns.INSTANCE.dohWarning("https://1.1.1.1/dns-query", ""));
+    }
+
+    @Test
+    public void DoH地址必须是https() {
+        assertNull(NetDns.INSTANCE.dohError(""));
+        assertNull(NetDns.INSTANCE.dohError("https://a.example.org/x\nhttps://b.example.org/y"));
+        assertTrue(NetDns.INSTANCE.dohError("http://a.example.org/x").contains("https://"));
+        assertTrue(NetDns.INSTANCE.dohError("https://a.example.org/x\nnot a url").contains("第 2 行"));
+    }
 }
