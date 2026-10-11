@@ -402,7 +402,7 @@ fun SettingsContent() {
         Row(horizontalArrangement = BtnRowGap) {
             ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }
             ActionBtn("清空") { Hub.clearErrorLog(); Hub.toast("已清空") }
-            ActionBtn("ECH 检测") { val r = EchProbe.run(); Hub.fail("ECH 检测", r.verdict, r.detail) }
+            EmptySlot()
         }
     }
 }
