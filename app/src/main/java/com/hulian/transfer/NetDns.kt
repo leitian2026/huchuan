@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  *  3. 系统 DNS：DoH 开关没开时用；开了但全部失败时，只有打开了“回退”才用（默认不回退，免得被劫持的答案又混进来）
  *
  * 局域网直连用的是 IP，不经过这里。
- * 注意：这只解决 DNS 被改；TLS 握手里的域名（SNI）仍是明文，见 ECH 的讨论。
+ * 注意：这只解决 DNS 被改；TLS 握手里的域名（SNI）仍是明文。
  */
 object NetDns : Dns {
     class Result(val addrs: List<InetAddress>, val source: String)
