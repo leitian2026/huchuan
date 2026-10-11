@@ -396,7 +396,8 @@ object Hub {
                 delay(5000)
                 tick++
                 val t = now()
-                _peers.value.values.filter { it.online && t - it.lastSeen > 60_000 }   // 不再有 3 秒一次的广播刷新在线时间：久未见到才探测一次.forEach { p ->
+                // 不再有 3 秒一次的广播刷新在线时间：久未见到（60 秒）才探测一次
+                _peers.value.values.filter { it.online && t - it.lastSeen > 60_000 }.forEach { p ->
                     launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
                 }
                 if (tick % 3 == 0) probeKnown()
