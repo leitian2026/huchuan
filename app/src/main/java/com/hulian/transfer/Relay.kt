@@ -39,13 +39,18 @@ object Relay {
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val acks = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val processing = ConcurrentHashMap.newKeySet<String>()
-    private val doneMids = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+    /** 已处理过的消息 ID：存在本机，重启后还在（最多记 1500 条，再老的靠消息里的时间戳拦） */
+    private val doneMids: MutableSet<String> by lazy { java.util.Collections.synchronizedSet(LinkedHashSet(Store.relayDoneMids)) }
+    private const val DONE_MAX = 1500
+    /** 消息里（已加密校验）的发送时间比这还早，就当作被人重放的旧文件 */
+    private const val MAX_AGE_MS = 30L * 24 * 3600 * 1000
     private val midPattern = Regex("[A-Za-z0-9-]{1,64}")
 
     private fun markDone(mid: String) {
         synchronized(doneMids) {
             doneMids.add(mid)
-            if (doneMids.size > 500) doneMids.remove(doneMids.first())
+            while (doneMids.size > DONE_MAX) doneMids.remove(doneMids.first())
+            Store.relayDoneMids = doneMids.toList()
         }
     }
 
@@ -272,7 +277,7 @@ object Relay {
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
         val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
-        val meta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId)
+        val meta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId).put("ts", now())
             .toString().toByteArray(Charsets.UTF_8)
         val key = RelayCrypto.key(peer.rk)
         val total = RelayCrypto.encryptedSize(meta.size, size)
@@ -366,6 +371,10 @@ object Relay {
                 // 收到的是对方刚发来的通知，对方等着这条消息：仍然提示，但不删文件（下次扫描网盘时再判断）
                 Hub.report("远程接收失败", e, "消息：$mid")
             }
+        } catch (e: StaleException) {
+            markDone(mid)
+            Hub.report("远程接收：已丢弃过旧的消息", e, "消息：$mid")
+            try { Store.dav?.let { WebDav.delete(it, "${Store.deviceId}/$mid.bin") } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
         } catch (e: Exception) {
             markDone(mid) // 失败的也不要在本次运行里反复重试
             Hub.report("远程接收失败", e, "消息：$mid")
@@ -377,6 +386,9 @@ object Relay {
     /** 所有候选密钥都解不开消息头（和下载中断、文件损坏这类错误区分开：那些不会走到这里） */
     private class NoKeyException(msg: String) : IOException(msg)
 
+    /** 消息太旧：不重试，也不留在网盘里 */
+    private class StaleException(msg: String) : IOException(msg)
+
     private fun handleStream(peers: List<Peer>, ins: InputStream) {
         val reader = RelayCrypto.Reader(ins)
         val (idx, metaBytes) = reader.open(peers.map { RelayCrypto.key(it.rk) })
@@ -384,6 +396,9 @@ object Relay {
         val peer = peers[idx]
         val meta = JSONObject(String(metaBytes, Charsets.UTF_8))
         if (meta.optString("from") != peer.id) throw IOException("来源校验失败：消息里的发送者和密钥对应的设备不一致")
+        // 旧版本发的没有 ts，照常收；有 ts 但太旧的，当作被重放的旧文件
+        val ts = meta.optLong("ts", 0L)
+        if (ts > 0 && now() - ts > MAX_AGE_MS) throw StaleException("这条远程消息是 30 天前发的，本机已经不收这么旧的内容（可能是被人重新放回网盘的旧文件）")
         when (val type = meta.getString("type")) {
             "text" -> {
                 val text = meta.getString("text")
