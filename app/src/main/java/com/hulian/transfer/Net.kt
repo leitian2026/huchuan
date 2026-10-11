@@ -348,6 +348,11 @@ object Server {
                         if (RelayCrypto.validKey(k)) Hub.setRelayKey(pid, k, onlyIfEmpty = true)
                         ok(ch)
                     }
+                    "cfg" -> {
+                        // 新旧手机配对时，对方把远程中转设置发过来：只在本机没有设置、且刚配对完时接受（见 RelayCfg）
+                        val err = Hub.receiveCfg(pid, h.optJSONObject("cfg"))
+                        if (err == null) ok(ch) else no(ch, err)
+                    }
                     else -> no(ch, "不支持的消息类型")
                 }
             }
