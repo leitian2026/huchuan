@@ -1,35 +1,24 @@
 package com.hulian.transfer
 
 import okhttp3.Dns
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
-import okhttp3.dnsoverhttps.DnsOverHttps
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.UnknownHostException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 
 /**
- * 公网请求（Cloudflare WebSocket、网盘 WebDAV）的域名解析，防 DNS 劫持：
- *  1. Host 映射（设置里填：域名 → IP）。命中就直接用，不发任何 DNS 查询；一个域名可以填多个 IP，连不上会依次换下一个
- *  2. 自建 DoH（设置里填，可填多个，按顺序试）。加密 DNS，运营商看不到也改不了
- *  3. 系统 DNS：没填 DoH 时用；填了 DoH 但全部失败时，只有打开了“回退”才用（默认不回退，免得被劫持的答案又混进来）
+ * 公网请求（Cloudflare WebSocket、网盘 WebDAV）的域名解析：
+ *  1. Host 映射（设置里填：域名 → IP）。命中就直接用，不发任何 DNS 查询；一个域名可以填多个 IP，连不上会依次换下一个。
+ *     URL 和 SNI 仍然是域名，只是把“域名对应哪个 IP”写死，所以证书校验、Host 头都正常
+ *  2. 没有映射的域名（比如网盘）用系统 DNS
  *
  * 局域网直连用的是 IP，不经过这里。
- * 注意：这只解决 DNS 被改；TLS 握手里的域名（SNI）仍是明文，见 ECH 的讨论。
+ * 注意：这只解决 DNS 被改；TLS 握手里的域名（SNI）仍是明文。
  */
 object NetDns : Dns {
     class Result(val addrs: List<InetAddress>, val source: String)
     class Parsed(val map: Map<String, List<InetAddress>>, val error: String?)
 
-    private const val TTL_MS = 5 * 60_000L
-
-    private class Cached(val at: Long, val r: Result)
-
-    private val cache = ConcurrentHashMap<String, Cached>()
     @Volatile private var hostsCache: Pair<String, Parsed>? = null
-    @Volatile private var dohCache: Pair<String, List<DnsOverHttps>>? = null
 
     private val v4 = Regex("^(25[0-5]|2[0-4]\\d|1?\\d?\\d)(\\.(25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}$")
 
@@ -81,34 +70,8 @@ object NetDns : Dns {
         return p
     }
 
-    /** DoH 地址的格式错误（每行都要是 https:// 地址）；没问题返回 null。设置页保存前检查 */
-    fun dohError(text: String): String? {
-        text.lines().map { it.trim() }.filter { it.isNotEmpty() }.forEachIndexed { i, line ->
-            val u = line.toHttpUrlOrNull()
-            if (u == null || u.scheme != "https") return "DoH 第 ${i + 1} 行不对：要以 https:// 开头，像 https://域名/路径"
-        }
-        return null
-    }
-
-    /**
-     * 提醒（不阻止保存）：DoH 服务器自己的域名如果没有 Host 映射，解析它就得先用系统 DNS，
-     * 而被劫持的正是系统 DNS，DoH 一开始就连不上。DoH 地址里直接写 IP 的不需要映射。没问题返回 null
-     */
-    fun dohWarning(dohText: String, hostsText: String): String? {
-        val map = parseHosts(hostsText).map
-        for (line in dohText.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
-            val u = line.toHttpUrlOrNull() ?: continue
-            val h = u.host.lowercase()
-            if (literal(h) != null) continue
-            if (map[h].isNullOrEmpty()) return "DoH 服务器 $h 没有 Host 映射，解析它要先走系统 DNS，可能被劫持。请在 Host 映射里加一行：$h IP"
-        }
-        return null
-    }
-
     /** 设置页保存后调用：清缓存，并断开旧连接，下次连接按新设置解析 */
     fun reset() {
-        cache.clear()
-        dohCache = null
         hostsCache = null
         try { Http.client.connectionPool.evictAll() } catch (e: Exception) { Hub.log("NetDns", e) }
     }
@@ -127,59 +90,12 @@ object NetDns : Dns {
         // 1. Host 映射
         parseHosts(Store.hostsText).map[host]?.let { if (it.isNotEmpty()) return Result(it, "Host 映射") }
 
-        // 2. 自建 DoH；没填就直接用系统 DNS。局域网名字（nas.local、没有点的主机名等）公网 DoH 查不到，也走系统 DNS
-        val dohText = Store.dohUrl.trim()
-        if (dohText.isEmpty() || isLocalName(host)) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS")
-
-        cache[host]?.let { if (System.currentTimeMillis() - it.at < TTL_MS) return it.r }
-
-        var last: Exception? = null
-        for (d in dohList(dohText)) {
-            try {
-                val a = ipv4First(d.lookup(hostname))
-                if (a.isNotEmpty()) {
-                    val r = Result(a, "自建 DoH")
-                    cache[host] = Cached(System.currentTimeMillis(), r)
-                    return r
-                }
-            } catch (e: Exception) {
-                last = e
-            }
-        }
-
-        // 3. 回退（默认关闭）
-        if (Store.dohFallback) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS（DoH 失败后回退）")
-        val why = last?.let { it.message ?: it.javaClass.simpleName } ?: "没有返回地址"
-        throw UnknownHostException("自建 DoH 解析 $hostname 失败：$why").also { if (last != null) it.initCause(last) }
+        // 2. 没有映射：系统 DNS
+        return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS")
     }
-
-    private fun isLocalName(h: String): Boolean =
-        !h.contains('.') || h.endsWith(".local") || h.endsWith(".lan") || h.endsWith(".home") ||
-            h.endsWith(".internal") || h.endsWith(".localdomain")
 
     /** IPv4 排前面：有些网络 IPv6 不通，先试 IPv6 会白等一轮超时 */
     private fun ipv4First(l: List<InetAddress>): List<InetAddress> = l.sortedBy { it is Inet6Address }
-
-    /** 每行一个 DoH 地址。DoH 服务器自己的域名也先查 Host 映射（相当于 bootstrap），避免“解析 DoH 要先解析 DoH”的死循环 */
-    private fun dohList(text: String): List<DnsOverHttps> {
-        val key = text + "\n" + Store.hostsText
-        dohCache?.let { if (it.first == key) return it.second }
-        val hosts = parseHosts(Store.hostsText).map
-        val client = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .build()
-        val list = text.lines().map { it.trim() }.filter { it.isNotEmpty() }.mapNotNull { line ->
-            val url = line.toHttpUrlOrNull() ?: return@mapNotNull null
-            if (url.scheme != "https") return@mapNotNull null
-            val b = DnsOverHttps.Builder().client(client).url(url).includeIPv6(true).resolvePrivateAddresses(false)
-            val boot = hosts[url.host.lowercase()]
-            if (!boot.isNullOrEmpty()) b.bootstrapDnsHosts(boot)
-            b.build()
-        }
-        dohCache = key to list
-        return list
-    }
 }
 
 /**
@@ -202,10 +118,10 @@ fun netHint(t: Throwable): String? {
         c = c.cause
         n++
     }
-    val fix = "请在设置里填写自建 DoH 和 Host 映射，或换一个域名 / 换网络 / 开代理"
+    val fix = "请在设置的“域名解析”里填 Host 映射（域名 → IP），或换一个 IP / 换网络 / 开代理"
     if (dns != null) {
         val own = dns.any { it in '\u4e00'..'\u9fff' }
-        return if (own) "$dns。请检查设置里的 DoH 地址和 Host 映射" else "域名解析失败，可能没有网络或 DNS 被干扰。$fix"
+        return if (own) "$dns。请检查设置里的 Host 映射" else "域名解析失败，可能没有网络或 DNS 被干扰。$fix"
     }
     if (cert) return "证书校验失败：连到的不是你的 Cloudflare 服务器，域名很可能被 DNS 劫持到了别处。$fix"
     if (ssl) return "TLS 握手被中途掐断：域名可能被 DNS 劫持，或被网络屏蔽。这和设备配对无关，不用删除设备。$fix"
