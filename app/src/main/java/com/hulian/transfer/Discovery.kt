@@ -125,12 +125,19 @@ class Discovery(ctx: Context) {
     }
 }
 
-/** UDP 广播发现：每 3 秒在局域网喊一声"我在这"，比 mDNS 更快更稳，作为 NSD 的补充 */
+/**
+ * UDP 广播发现，作为 NSD 的补充。不再定时广播，改成事件触发：
+ *  - 启动 / 换网络 / 手动“重新搜索”时，广播几次（间隔逐渐拉长），所有已配对设备都在线了就提前停
+ *  - 收到已配对设备的广播，单播回一包给它（对方刚上线，不用等它再喊）；陌生设备的广播一律不理，也不回应
+ *  - 广播里只有设备 ID 和端口，不带设备名：同一个 Wi-Fi 里的陌生人看不到你的手机叫什么
+ */
 class Beacon(private val ctx: Context) {
     private val udpPort = 45454
     private var sock: DatagramSocket? = null
     private var lock: WifiManager.MulticastLock? = null
     private val jobs = ArrayList<Job>()
+    private var burstJob: Job? = null
+    private val lastReply = HashMap<String, Long>()
 
     @Synchronized
     fun start() {
@@ -151,12 +158,23 @@ class Beacon(private val ctx: Context) {
         }
         sock = s
         jobs.add(Hub.scope.launch { receiveLoop(s) })
-        jobs.add(Hub.scope.launch {
-            while (isActive) {
-                sendAll(s)
-                delay(3000)
+        burst(s)
+    }
+
+    /** 广播几次：0、1、2、4、8 秒各一次；所有已配对设备都在线就提前停 */
+    private fun burst(s: DatagramSocket) {
+        burstJob?.cancel()
+        burstJob = Hub.scope.launch {
+            val gaps = longArrayOf(1000, 1000, 2000, 4000)
+            sendAll(s, reply = false)
+            for (g in gaps) {
+                if (Hub.allPairedOnline()) break
+                delay(g)
+                if (!isActive || s.isClosed) return@launch
+                sendAll(s, reply = false)
             }
-        })
+        }
+        jobs.add(burstJob!!)
     }
 
     @Synchronized
@@ -181,16 +199,30 @@ class Beacon(private val ctx: Context) {
                 val id = j.getString("id")
                 if (id == Store.deviceId) continue
                 val host = pkt.address.hostAddress ?: continue
-                Hub.discovered(id, j.optString("name"), host, j.getInt("port"))
+                Hub.discovered(id, "", host, j.getInt("port"))
+                // 对方是已配对设备，并且这包不是别人的回复：回一包给它（10 秒内对同一台只回一次）
+                if (j.optInt("r", 0) == 0 && Hub.isPaired(id)) {
+                    val t = System.currentTimeMillis()
+                    val ok = synchronized(lastReply) { (t - (lastReply[id] ?: 0L) > 10_000).also { if (it) lastReply[id] = t } }
+                    if (ok) sendTo(s, pkt.address, reply = true)
+                }
             } catch (e: Exception) {
                 if (s.isClosed) break
             }
         }
     }
 
-    private fun sendAll(s: DatagramSocket) {
-        val data = JSONObject().put("t", "hlb").put("id", Store.deviceId)
-            .put("name", Store.deviceName).put("port", Hub.port).toString().toByteArray(Charsets.UTF_8)
+    private fun payload(reply: Boolean): ByteArray =
+        JSONObject().put("t", "hlb").put("id", Store.deviceId).put("port", Hub.port).put("r", if (reply) 1 else 0)
+            .toString().toByteArray(Charsets.UTF_8)
+
+    private fun sendTo(s: DatagramSocket, to: InetAddress, reply: Boolean) {
+        val data = payload(reply)
+        try { s.send(DatagramPacket(data, data.size, to, udpPort)) } catch (e: Exception) { Hub.log("Discovery", e) }
+    }
+
+    private fun sendAll(s: DatagramSocket, reply: Boolean) {
+        val data = payload(reply)
         val targets = HashSet<InetAddress>()
         try { targets.add(InetAddress.getByName("255.255.255.255")) } catch (e: Exception) { Hub.log("Discovery", e) }
         try {
