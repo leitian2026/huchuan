@@ -158,6 +158,12 @@ object Hub {
     // ---------- 配对确认 ----------
     /** 当前要弹出的配对确认窗口（被扫的一方：核对验证码并同意；扫码的一方：显示验证码等待） */
     val pairPrompt = MutableStateFlow<PairPrompt?>(null)
+    /** 刚配对成功、本机有远程中转设置时：问用户要不要把设置发给对方（默认不发） */
+    class CfgOffer(val peerId: String, val peerName: String)
+    val cfgOffer = MutableStateFlow<CfgOffer?>(null)
+    /** 设置被别处改过（收到同步）：设置页据此重新读取，免得拿旧值覆盖 */
+    val cfgRev = MutableStateFlow(0)
+    private val cfgWindow = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** 同一时间只处理一个配对请求 */
     val pairBusy = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -226,6 +232,41 @@ object Hub {
             map + (id to Peer(id, n, host, port, true, now(), fp, iHost, rk.ifEmpty { old?.rk ?: "" }))
         }
         persistSoon()
+        // 刚配对：10 分钟内允许这台设备把远程中转设置发过来；本机有设置的话，问用户要不要发给它
+        cfgWindow[id] = now() + RelayCfg.WINDOW_MS
+        if (RelayCfg.hasConfig()) cfgOffer.value = CfgOffer(id, name.ifEmpty { "对方设备" })
+    }
+
+    fun isPaired(id: String): Boolean = _peers.value[id]?.paired == true
+
+    /** 所有已配对设备都显示在线（没有已配对设备也算）：广播发现据此提前停止 */
+    fun allPairedOnline(): Boolean = _peers.value.values.filter { it.paired }.all { it.online }
+
+    /** 用户点了“发送”：把本机的远程中转设置发给刚配对的设备（走已认证的 TLS 直连通道） */
+    fun sendCfg(offer: CfgOffer) {
+        val p = _peers.value[offer.peerId] ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                Net.send(p, JSONObject().put("type", "cfg").put("cfg", RelayCfg.export()), null) { }
+                toast("已把远程中转设置发给“${offer.peerName}”")
+            } catch (e: Exception) {
+                report("发送远程中转设置失败", e)
+            }
+        }
+    }
+
+    /** 收到对方发来的设置（Net 已确认对方是已配对设备）。接受返回 null，不接受返回原因 */
+    fun receiveCfg(pid: String, j: JSONObject?): String? {
+        if (j == null) return "没有收到设置内容"
+        if ((cfgWindow[pid] ?: 0L) < now()) return "只在刚配对后的 10 分钟内接受设置同步"
+        val err = RelayCfg.applyIfEmpty(j)
+        if (err == null) {
+            cfgWindow.remove(pid)
+            cfgRev.value++
+            Relay.restart()
+            toast("已从“${_peers.value[pid]?.name ?: "对方"}”同步远程中转设置")
+        }
+        return err
     }
 
     fun setRelayKey(id: String, key: String, onlyIfEmpty: Boolean = false) {
@@ -355,7 +396,7 @@ object Hub {
                 delay(5000)
                 tick++
                 val t = now()
-                _peers.value.values.filter { it.online && t - it.lastSeen > 12000 }.forEach { p ->
+                _peers.value.values.filter { it.online && t - it.lastSeen > 60_000 }   // 不再有 3 秒一次的广播刷新在线时间：久未见到才探测一次.forEach { p ->
                     launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
                 }
                 if (tick % 3 == 0) probeKnown()
