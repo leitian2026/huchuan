@@ -251,6 +251,24 @@ fun AppRoot() {
         }
     }
 
+    // 配对成功后：本机有远程中转设置，问要不要发给对方（默认不发，发给别人对方就能用你的网盘和口令）
+    val cfgOffer by Hub.cfgOffer.collectAsState()
+    cfgOffer?.let { o ->
+        AlertDialog(
+            onDismissRequest = { Hub.cfgOffer.value = null },
+            title = { Text("同步远程中转设置？") },
+            text = {
+                Text(
+                    "已和\u201c${o.peerName}\u201d配对。要把本机的远程中转设置（Cloudflare 地址和口令、网盘账号密码、域名解析）也发给它，让它不用重新填吗？\n\n" +
+                        "只发给你自己的手机。发给别人，对方就能用你的网盘和口令。",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = { TextButton(onClick = { Hub.cfgOffer.value = null; Hub.sendCfg(o) }) { Text("发送") } },
+            dismissButton = { TextButton(onClick = { Hub.cfgOffer.value = null }) { Text("不发送") } }
+        )
+    }
+
     // 扫热点二维码：缺权限时先申请；仍然没有就改为手动连接（免权限）
     val needPerm by HotspotJoin.needPerm.collectAsState()
     val joinPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
