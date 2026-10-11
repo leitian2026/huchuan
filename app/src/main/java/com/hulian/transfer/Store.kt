@@ -94,6 +94,10 @@ object Store {
     var dohUrl: String
         get() = secret("dnsDoh")
         set(v) = putSecret("dnsDoh", v)
+    /** 已处理过的远程消息 ID（防重放：有网盘账号的人把旧的加密文件放回去，重启后也不会再被当成新消息收下） */
+    var relayDoneMids: List<String>
+        get() = (prefs.getString("rDone", "") ?: "").split('\n').filter { it.isNotEmpty() }
+        set(v) { prefs.edit().putString("rDone", v.joinToString("\n")).apply() }
     /** 是否启用自建 DoH（默认关）。关闭时填的地址保留但不使用，没有映射的域名直接走系统 DNS */
     var dohOn: Boolean
         get() = prefs.getBoolean("dnsDohOn", false)
