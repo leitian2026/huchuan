@@ -66,7 +66,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")   // 远程中转：WebSocket（Cloudflare）和 WebDAV（坚果云）
-    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")   // 自建 DoH（版本要和 okhttp 一致）
     implementation("org.conscrypt:conscrypt-android:2.7.0")   // 自带 TLS 库（发布说明里 2.7.0 起支持 ECH），目前只用于「ECH 检测」，不改变任何连接
 
     testImplementation("junit:junit:4.13.2")
