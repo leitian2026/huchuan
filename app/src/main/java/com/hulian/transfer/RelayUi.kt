@@ -42,9 +42,7 @@ fun RelaySettingsCard() {
     var davUser by remember { mutableStateOf(Store.davUser) }
     var davPass by remember { mutableStateOf(Store.davPass) }
     var davDir by remember { mutableStateOf(Store.davDir) }
-    var doh by remember { mutableStateOf(Store.dohUrl) }
     var hosts by remember { mutableStateOf(Store.hostsText) }
-    var dohFb by remember { mutableStateOf(Store.dohFallback) }
     var dnsInfo by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val state by Relay.state.collectAsState()
@@ -58,9 +56,7 @@ fun RelaySettingsCard() {
         Store.davUser = davUser.trim()
         Store.davPass = davPass.trim()
         Store.davDir = davDir.trim().trim('/').ifEmpty { "hulian-relay" }
-        Store.dohUrl = doh.trim()
         Store.hostsText = hosts.trim()
-        Store.dohFallback = dohFb
         NetDns.reset()
         WebDav.forgetDirs()
         Relay.restart()
@@ -98,7 +94,7 @@ fun RelaySettingsCard() {
     fun exportCfg(): String {
         val j = JSONObject().put("u", url.trim()).put("s", secret.trim()).put("du", davUrl.trim())
             .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim()).put("dv", prov)
-            .put("dh", doh.trim()).put("hs", hosts.trim()).put("df", dohFb)
+            .put("hs", hosts.trim())
         return "HLC1:" + Base64.encodeToString(j.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
@@ -118,10 +114,8 @@ fun RelaySettingsCard() {
             davUser = j.getString("dn")
             davPass = j.getString("dp")
             davDir = j.getString("dd")
-            // 旧版本导出的配置没有域名解析设置：保持本机原有的不动
-            if (j.has("dh")) doh = j.getString("dh")
+            // 旧版本导出的配置没有 Host 映射就保持本机原有的不动；里面的 DoH 设置（dh / df）已取消，忽略
             if (j.has("hs")) hosts = j.getString("hs")
-            if (j.has("df")) dohFb = j.getBoolean("df")
             on = true
             save()
             Hub.toast("已导入并保存")
@@ -131,16 +125,13 @@ fun RelaySettingsCard() {
     }
 
     val cur = DavProviders.get(prov)
-    val dohCount = doh.lines().count { it.isNotBlank() }
     val hostCount = hosts.lines().count { it.substringBefore('#').isNotBlank() }
-    val dnsSummary = if (dohCount == 0 && hostCount == 0) "未配置" else "DoH $dohCount 个 · Host $hostCount 条"
+    val dnsSummary = if (hostCount == 0) "未配置" else "Host $hostCount 条"
     val hostsErr = NetDns.parseHosts(hosts).error
-    val dohErr = NetDns.dohError(doh)
-    val dohWarn = if (dohErr == null && hostsErr == null) NetDns.dohWarning(doh, hosts) else null
 
-    /** 保存前的检查：中转和网盘只许 https；DoH、Host 映射格式要对。返回第一个错误，没有返回 null */
+    /** 保存前的检查：中转和网盘只许 https；Host 映射格式要对。返回第一个错误，没有返回 null */
     fun settingsError(): String? =
-        UrlRules.relayError(url) ?: UrlRules.davError(davUrl, DavProviders.get(prov).name) ?: dohErr ?: hostsErr
+        UrlRules.relayError(url) ?: UrlRules.davError(davUrl, DavProviders.get(prov).name) ?: hostsErr
 
     SettingsCard {
         CardTitle(
@@ -155,14 +146,11 @@ fun RelaySettingsCard() {
 
         FoldSection("域名解析", dnsSummary) {
             Text(
-                "先查 Host 映射，再问自建 DoH，都不填用系统 DNS。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
+                "给域名指定 IP：填了的域名直接连这个 IP，不查 DNS；一个域名可以填多个 IP，连不上自动换下一个。没填的域名用系统 DNS。握手时的域名（SNI）仍是明文。",
                 fontSize = 12.sp, color = Gray
             )
-            Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
             Field("Host 映射（每行：域名 IP [IP…]）", hosts, lines = 3) { hosts = it }
-            (dohErr ?: hostsErr)?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
-            dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
-            SwitchRow("DoH 失败时回退系统 DNS", dohFb, "默认关：关闭时 DoH 不可用就连不上；打开等于放回可能被劫持的系统 DNS") { dohFb = it }
+            hostsErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
         }
 
         FoldSection("网盘", cur.name + " · " + davDir, startOpen = davUser.isBlank() || davPass.isBlank()) {
@@ -182,11 +170,11 @@ fun RelaySettingsCard() {
         Row(horizontalArrangement = BtnRowGap) {
             ActionBtn("保存", filled = true) {
                 val err = settingsError()
-                if (err != null) Hub.toast(err) else { save(); Hub.toast(if (dohWarn != null) "已保存。注意：$dohWarn" else "已保存") }
+                if (err != null) Hub.toast(err) else { save(); Hub.toast("已保存") }
             }
             ActionBtn("复制配置") {
                 ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("互传配置", exportCfg()))
-                Hub.toast("已复制。里面有口令、网盘密码和 DoH 地址，只粘贴到自己的设备上")
+                Hub.toast("已复制。里面有口令和网盘密码，只粘贴到自己的设备上")
             }
             ActionBtn("粘贴配置") { importCfg() }
         }
