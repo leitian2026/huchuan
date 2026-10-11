@@ -33,6 +33,13 @@ import org.json.JSONObject
 /** 设置页里的“远程中转”：Cloudflare 地址 / 口令 + 网盘（坚果云 / InfiniCLOUD / 自定义）账号，可测试、可在两台手机间复制配置 */
 @Composable
 fun RelaySettingsCard() {
+    // 设置被“新旧手机同步”改过时，重新读取一遍，免得页面里的旧值再被保存回去
+    val rev by Hub.cfgRev.collectAsState()
+    key(rev) { RelaySettingsCardBody() }
+}
+
+@Composable
+private fun RelaySettingsCardBody() {
     val ctx = LocalContext.current
     var on by remember { mutableStateOf(Store.relayOn) }
     var url by remember { mutableStateOf(Store.relayUrl) }
