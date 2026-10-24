@@ -49,9 +49,13 @@ private fun RelaySettingsCardBody() {
     var davUser by remember { mutableStateOf(Store.davUser) }
     var davPass by remember { mutableStateOf(Store.davPass) }
     var davDir by remember { mutableStateOf(Store.davDir) }
+    var doh by remember { mutableStateOf(Store.dohUrl) }
     var hostsOn by remember { mutableStateOf(Store.hostsOn) }
     var hosts by remember { mutableStateOf(Store.hostsText) }
-    var sysOn by remember { mutableStateOf(Store.sysDnsOn) }
+    var dohOn by remember { mutableStateOf(Store.dohOn) }
+    var dohFb by remember { mutableStateOf(Store.dohFallback) }
+    var cfSys by remember { mutableStateOf(Store.cfSysDns) }
+    var davSys by remember { mutableStateOf(Store.davSysDns) }
     var dnsInfo by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val state by Relay.state.collectAsState()
@@ -65,9 +69,13 @@ private fun RelaySettingsCardBody() {
         Store.davUser = davUser.trim()
         Store.davPass = davPass.trim()
         Store.davDir = davDir.trim().trim('/').ifEmpty { "hulian-relay" }
+        Store.dohUrl = doh.trim()
         Store.hostsText = hosts.trim()
         Store.hostsOn = hostsOn
-        Store.sysDnsOn = sysOn
+        Store.dohFallback = dohFb
+        Store.dohOn = dohOn
+        Store.cfSysDns = cfSys
+        Store.davSysDns = davSys
         NetDns.reset()
         WebDav.forgetDirs()
         Relay.restart()
@@ -105,7 +113,8 @@ private fun RelaySettingsCardBody() {
     fun exportCfg(): String {
         val j = JSONObject().put("u", url.trim()).put("s", secret.trim()).put("du", davUrl.trim())
             .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim()).put("dv", prov)
-            .put("hs", hosts.trim()).put("ho", hostsOn).put("so", sysOn)
+            .put("dh", doh.trim()).put("hs", hosts.trim()).put("df", dohFb).put("do", dohOn).put("ho", hostsOn)
+            .put("cs", cfSys).put("ds", davSys)
         return "HLC1:" + Base64.encodeToString(j.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
@@ -126,9 +135,15 @@ private fun RelaySettingsCardBody() {
             davPass = j.getString("dp")
             davDir = j.getString("dd")
             // 旧版本导出的配置没有域名解析设置：保持本机原有的不动
+            if (j.has("dh")) doh = j.getString("dh")
             if (j.has("hs")) hosts = j.getString("hs")
-            if (j.has("so")) sysOn = j.getBoolean("so")
             if (j.has("ho")) hostsOn = j.getBoolean("ho")   // 旧配置没有这个开关：保持本机原样
+            if (j.has("df")) dohFb = j.getBoolean("df")
+            // 旧版本导出的配置没有开关：填了 DoH 地址就当开着，和升级时的规则一致
+            if (j.has("do")) dohOn = j.getBoolean("do") else if (j.has("dh") && j.getString("dh").isNotBlank()) dohOn = true
+            // 旧版本导出的配置没有这两个开关：保持本机原样
+            if (j.has("cs")) cfSys = j.getBoolean("cs")
+            if (j.has("ds")) davSys = j.getBoolean("ds")
             on = true
             save()
             Hub.toast("已导入并保存")
@@ -138,13 +153,20 @@ private fun RelaySettingsCardBody() {
     }
 
     val cur = DavProviders.get(prov)
+    // DoH 只给网盘用；网盘选了“使用系统 DNS”时 DoH 不生效，也就不检查它（免得界面上看不见的东西挡住保存）
+    val dohEff = dohOn && !davSys
+    val dohCount = if (dohEff) doh.lines().count { it.isNotBlank() } else 0
     val hostCount = if (hostsOn) hosts.lines().count { it.substringBefore('#').isNotBlank() } else 0
-    val dnsSummary = (if (!hostsOn) "Host 关" else if (hostCount == 0) "未配置" else "Host $hostCount 条") + (if (sysOn) "" else " · 系统 DNS 关")
-    val hostsErr = if (hostsOn) NetDns.parseHosts(hosts).error else null
+    val dnsSummary = if (!hostsOn) "Host 映射关" else if (hostCount == 0) "未配置" else "Host $hostCount 条"
+    val davDnsSummary = if (davSys) "系统 DNS" else if (dohEff) "DoH $dohCount 个" else ""
+    // 两路都用系统 DNS 时，Host 映射谁也不用，格式问题不挡保存
+    val hostsErr = if (hostsOn && !(cfSys && davSys)) NetDns.parseHosts(hosts).error else null
+    val dohErr = if (dohEff) NetDns.dohError(doh) else null
+    val dohWarn = if (dohEff && dohErr == null && hostsErr == null) NetDns.dohWarning(doh, if (hostsOn) hosts else "") else null
 
-    /** 保存前的检查：中转和网盘只许 https；Host 映射格式要对。返回第一个错误，没有返回 null */
+    /** 保存前的检查：中转和网盘只许 https；DoH、Host 映射格式要对。返回第一个错误，没有返回 null */
     fun settingsError(): String? =
-        UrlRules.relayError(url) ?: UrlRules.davError(davUrl, DavProviders.get(prov).name) ?: hostsErr
+        UrlRules.relayError(url) ?: UrlRules.davError(davUrl, DavProviders.get(prov).name) ?: dohErr ?: hostsErr
 
     SettingsCard {
         CardTitle(
@@ -157,19 +179,20 @@ private fun RelaySettingsCardBody() {
         Field("Cloudflare 地址（域名或 xxx.workers.dev）", url) { url = it }
         Field("中转口令（RELAY_SECRET）", secret, secretField = true) { secret = it }
 
+        SwitchRow("Cloudflare 使用系统 DNS", cfSys, "开着时连 Cloudflare 不用 Host 映射，直接用系统 DNS") { cfSys = it }
+
         FoldSection("域名解析", dnsSummary) {
             Text(
-                "Host 映射：给域名指定 IP，填了的域名直接连这个 IP，不查 DNS，连不上自动换下一个。" +
-                    "没有映射的域名是否用系统 DNS 由下面的开关决定。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
+                "Host 映射：给域名指定 IP，填了的域名直接连这个 IP，不查 DNS，连不上自动换下一个。Cloudflare 和网盘共用这一份；" +
+                    "哪一路开了“使用系统 DNS”，那一路就不用它。没有映射的域名用系统 DNS（网盘可另开自建 DoH，在“网盘”里设置）。",
                 fontSize = 12.sp, color = Gray
             )
             SwitchRow("使用 Host 映射", hostsOn, "关闭时下面填的内容保留但不使用，所有域名都不再用写死的 IP") { hostsOn = it }
             if (hostsOn) Field("Host 映射（每行：域名 IP [IP…]）", hosts, lines = 3) { hosts = it }
-            SwitchRow("没映射的域名用系统 DNS", sysOn, "关闭时只有上面 Host 映射里的域名能连，其他域名直接解析失败") { sysOn = it }
             hostsErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
         }
 
-        FoldSection("网盘", cur.name + " · " + davDir, startOpen = davUser.isBlank() || davPass.isBlank()) {
+        FoldSection("网盘", cur.name + " · " + davDir + (if (davDnsSummary.isEmpty()) "" else " · $davDnsSummary"), startOpen = davUser.isBlank() || davPass.isBlank()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DavProviders.all.forEach { p ->
                     FilterChip(selected = prov == p.id, onClick = { switchProv(p.id) }, label = { Text(p.name) })
@@ -180,17 +203,32 @@ private fun RelaySettingsCardBody() {
             Field(cur.userLabel, davUser) { davUser = it }
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
+
+            SwitchRow("网盘使用系统 DNS", davSys, "开着时连网盘不用 Host 映射，也不用自建 DoH，直接用系统 DNS") { davSys = it }
+            if (!davSys) {
+                Text(
+                    "自建 DoH（可选，默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
+                    fontSize = 12.sp, color = Gray
+                )
+                SwitchRow("使用自建 DoH", dohOn, "关闭时没有映射的网盘域名用系统 DNS；填的 DoH 地址会保留") { dohOn = it }
+                if (dohOn) {
+                    Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
+                    SwitchRow("DoH 失败时回退系统 DNS", dohFb, "默认关：关闭时 DoH 不可用就连不上；打开等于放回可能被劫持的系统 DNS") { dohFb = it }
+                }
+                dohErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
+                dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
+            }
         }
 
         HorizontalDivider(color = Color(0xFFEDEFF3))
         Row(horizontalArrangement = BtnRowGap) {
             ActionBtn("保存", filled = true) {
                 val err = settingsError()
-                if (err != null) Hub.toast(err) else { save(); Hub.toast("已保存") }
+                if (err != null) Hub.toast(err) else { save(); Hub.toast(if (dohWarn != null) "已保存。注意：$dohWarn" else "已保存") }
             }
             ActionBtn("复制配置") {
                 ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("互传配置", exportCfg()))
-                Hub.toast("已复制。里面有口令和网盘密码，只粘贴到自己的设备上")
+                Hub.toast("已复制。里面有口令、网盘密码和 DoH 地址，只粘贴到自己的设备上")
             }
             ActionBtn("粘贴配置") { importCfg() }
         }
@@ -205,13 +243,17 @@ private fun RelaySettingsCardBody() {
             ActionBtn("测试解析", enabled = !busy) {
                 val err = settingsError()
                 val h = hostOf(url)
+                val dh = hostOf(davUrl)
                 if (err != null) { Hub.toast(err); return@ActionBtn }
-                if (h.isEmpty()) { Hub.toast("先填 Cloudflare 地址"); return@ActionBtn }
+                if (h.isEmpty() && dh.isEmpty()) { Hub.toast("先填 Cloudflare 或网盘地址"); return@ActionBtn }
                 save()
                 busy = true
-                dnsInfo = "正在解析 $h …"
+                dnsInfo = "正在解析 …"
                 Hub.scope.launch {
-                    dnsInfo = try { NetDns.explain(h) } catch (e: Exception) { "失败：" + friendlyError(e) }
+                    fun one(name: String, host: String, chan: NetDns.Chan): String? =
+                        if (host.isEmpty()) null
+                        else name + "：" + try { NetDns.explain(host, chan) } catch (e: Exception) { "失败：" + friendlyError(e) }
+                    dnsInfo = listOfNotNull(one("Cloudflare", h, NetDns.Chan.CF), one("网盘", dh, NetDns.Chan.DAV)).joinToString("\n")
                     busy = false
                 }
             }
