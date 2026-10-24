@@ -18,12 +18,18 @@ import java.util.concurrent.TimeUnit
 class DavConfig(val url: String, val user: String, val pass: String, val dir: String)
 
 object Http {
-    val client: OkHttpClient = OkHttpClient.Builder()
-        .dns(NetDns)   // Host 映射 → 系统 DNS，见 NetDns
+    private fun base(dns: okhttp3.Dns): OkHttpClient = OkHttpClient.Builder()
+        .dns(dns)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    /** Cloudflare 用：Host 映射 → 系统 DNS（开了“使用系统 DNS”就直接系统 DNS），见 NetDns */
+    val client: OkHttpClient = base(NetDns.cf)
+
+    /** 网盘 WebDAV 用：Host 映射 → 自建 DoH → 系统 DNS（开了“使用系统 DNS”就直接系统 DNS），见 NetDns */
+    val dav: OkHttpClient = base(NetDns.dav)
 
     /** WebSocket 长连接：不设读超时（心跳由应用自己发） */
     val ws: OkHttpClient by lazy { client.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
@@ -70,7 +76,7 @@ object WebDav {
         throw DavException(code, "${Store.davName}${op}失败：" + why(code) + "（HTTP $code）")
 
     private fun call(req: Request, op: String): Response {
-        val r = Http.client.newCall(req).execute()
+        val r = Http.dav.newCall(req).execute()
         if (!r.isSuccessful) {
             val code = r.code
             r.close()
@@ -80,7 +86,7 @@ object WebDav {
     }
 
     private fun mkcol(c: DavConfig, sub: String) {
-        val r = Http.client.newCall(builder(c, url(c, sub)).method("MKCOL", null).build()).execute()
+        val r = Http.dav.newCall(builder(c, url(c, sub)).method("MKCOL", null).build()).execute()
         r.use {
             // 201 新建；405 已经存在；有的服务器对已存在的文件夹回 301/302
             if (it.code !in setOf(200, 201, 204, 301, 302, 405)) fail("创建文件夹", it.code)
@@ -122,7 +128,7 @@ object WebDav {
     fun listBins(c: DavConfig, sub: String): List<String> {
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
-        return Http.client.newCall(req).execute().use { r ->
+        return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<String>()
             if (!r.isSuccessful) fail("查看文件夹", r.code)
             val text = r.body!!.string()
