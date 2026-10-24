@@ -15,8 +15,10 @@ object Store {
     fun init(c: Context) {
         ctx = c.applicationContext
         prefs = ctx.getSharedPreferences("hulian", Context.MODE_PRIVATE)
-        // 旧版本留下的自建 DoH 设置已经不用了，清掉
-        prefs.edit().remove("dnsDoh").remove("dnsDohOn").remove("dnsFb").apply()
+        // 旧版本没有 DoH 开关、填了 DoH 地址就等于在用：升级后保持开着，别悄悄变成关
+        if (!prefs.contains("dnsDohOn") && !prefs.getString("dnsDoh", null).isNullOrEmpty()) {
+            prefs.edit().putBoolean("dnsDohOn", true).apply()
+        }
     }
 
     val deviceId: String
@@ -87,23 +89,39 @@ object Store {
             return if (u.isEmpty() || n.isEmpty() || p.isEmpty()) null else DavConfig(u, n, p, davDir.ifBlank { "hulian-relay" })
         }
 
-    // ---------- 公网域名解析（防 DNS 劫持）：Host 映射，见 NetDns ----------
+    // ---------- 公网域名解析（防 DNS 劫持）：Host 映射（Cloudflare、网盘共用）+ 自建 DoH（只给网盘）+ 各自的“使用系统 DNS”开关，见 NetDns ----------
+    /** 自建 DoH 地址，每行一个，按顺序试。地址里常带随机路径，等于口令，所以加密保存 */
+    var dohUrl: String
+        get() = secret("dnsDoh")
+        set(v) = putSecret("dnsDoh", v)
     /** 已处理过的远程消息 ID（防重放：有网盘账号的人把旧的加密文件放回去，重启后也不会再被当成新消息收下） */
     var relayDoneMids: List<String>
         get() = (prefs.getString("rDone", "") ?: "").split('\n').filter { it.isNotEmpty() }
         set(v) { prefs.edit().putString("rDone", v.joinToString("\n")).apply() }
-    /** 是否启用 Host 映射（默认开）。关闭时填的内容保留但不使用 */
+    /** 是否启用自建 DoH（只用于网盘，默认关）。关闭时填的地址保留但不使用，没有映射的域名直接走系统 DNS */
+    var dohOn: Boolean
+        get() = prefs.getBoolean("dnsDohOn", false)
+        set(v) { prefs.edit().putBoolean("dnsDohOn", v).apply() }
+    /** 是否启用 Host 映射（默认开）。关闭时填的内容保留但不使用，DoH 服务器的引导解析也不再用它 */
     var hostsOn: Boolean
         get() = prefs.getBoolean("dnsHostsOn", true)
         set(v) { prefs.edit().putBoolean("dnsHostsOn", v).apply() }
-    /** 没有映射的域名是否用系统 DNS（默认开）。关闭时没有映射的域名直接解析失败，只有 Host 映射里的域名能连 */
-    var sysDnsOn: Boolean
-        get() = prefs.getBoolean("dnsSysOn", true)
-        set(v) { prefs.edit().putBoolean("dnsSysOn", v).apply() }
     /** Host 映射：每行 “域名 IP [IP…]”，命中就不查 DNS */
     var hostsText: String
         get() = prefs.getString("dnsHosts", "") ?: ""
         set(v) { prefs.edit().putString("dnsHosts", v).apply() }
+    /** Cloudflare 是否直接用系统 DNS（默认关）。开着时不用 Host 映射，域名直接交给系统解析 */
+    var cfSysDns: Boolean
+        get() = prefs.getBoolean("dnsCfSys", false)
+        set(v) { prefs.edit().putBoolean("dnsCfSys", v).apply() }
+    /** 网盘是否直接用系统 DNS（默认关）。开着时既不用 Host 映射也不用自建 DoH */
+    var davSysDns: Boolean
+        get() = prefs.getBoolean("dnsDavSys", false)
+        set(v) { prefs.edit().putBoolean("dnsDavSys", v).apply() }
+    /** 网盘的 DoH 全部失败时是否回退到系统 DNS（默认不回退：回退等于把可能被劫持的系统 DNS 放回来） */
+    var dohFallback: Boolean
+        get() = prefs.getBoolean("dnsFb", false)
+        set(v) { prefs.edit().putBoolean("dnsFb", v).apply() }
 
     /** 口令类设置用系统密钥库加密后再存 */
     private fun secret(k: String): String {
