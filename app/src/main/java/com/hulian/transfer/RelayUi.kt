@@ -53,7 +53,6 @@ private fun RelaySettingsCardBody() {
     var hostsOn by remember { mutableStateOf(Store.hostsOn) }
     var hosts by remember { mutableStateOf(Store.hostsText) }
     var dohOn by remember { mutableStateOf(Store.dohOn) }
-    var dohFb by remember { mutableStateOf(Store.dohFallback) }
     var cfSys by remember { mutableStateOf(Store.cfSysDns) }
     var davSys by remember { mutableStateOf(Store.davSysDns) }
     var dnsInfo by remember { mutableStateOf("") }
@@ -72,7 +71,6 @@ private fun RelaySettingsCardBody() {
         Store.dohUrl = doh.trim()
         Store.hostsText = hosts.trim()
         Store.hostsOn = hostsOn
-        Store.dohFallback = dohFb
         Store.dohOn = dohOn
         Store.cfSysDns = cfSys
         Store.davSysDns = davSys
@@ -113,7 +111,7 @@ private fun RelaySettingsCardBody() {
     fun exportCfg(): String {
         val j = JSONObject().put("u", url.trim()).put("s", secret.trim()).put("du", davUrl.trim())
             .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim()).put("dv", prov)
-            .put("dh", doh.trim()).put("hs", hosts.trim()).put("df", dohFb).put("do", dohOn).put("ho", hostsOn)
+            .put("dh", doh.trim()).put("hs", hosts.trim()).put("do", dohOn).put("ho", hostsOn)
             .put("cs", cfSys).put("ds", davSys)
         return "HLC1:" + Base64.encodeToString(j.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP or Base64.URL_SAFE)
     }
@@ -138,7 +136,6 @@ private fun RelaySettingsCardBody() {
             if (j.has("dh")) doh = j.getString("dh")
             if (j.has("hs")) hosts = j.getString("hs")
             if (j.has("ho")) hostsOn = j.getBoolean("ho")   // 旧配置没有这个开关：保持本机原样
-            if (j.has("df")) dohFb = j.getBoolean("df")
             // 旧版本导出的配置没有开关：填了 DoH 地址就当开着，和升级时的规则一致
             if (j.has("do")) dohOn = j.getBoolean("do") else if (j.has("dh") && j.getString("dh").isNotBlank()) dohOn = true
             // 旧版本导出的配置没有这两个开关：保持本机原样
@@ -153,14 +150,13 @@ private fun RelaySettingsCardBody() {
     }
 
     val cur = DavProviders.get(prov)
-    // DoH 只给网盘用；网盘选了“使用系统 DNS”时 DoH 不生效，也就不检查它（免得界面上看不见的东西挡住保存）
-    val dohEff = dohOn && !davSys
+    // DoH 只给网盘用
+    val dohEff = dohOn
     val dohCount = if (dohEff) doh.lines().count { it.isNotBlank() } else 0
     val hostCount = if (hostsOn) hosts.lines().count { it.substringBefore('#').isNotBlank() } else 0
     val dnsSummary = if (!hostsOn) "Host 映射关" else if (hostCount == 0) "未配置" else "Host $hostCount 条"
-    val davDnsSummary = if (davSys) "系统 DNS" else if (dohEff) "DoH $dohCount 个" else ""
-    // 两路都用系统 DNS 时，Host 映射谁也不用，格式问题不挡保存
-    val hostsErr = if (hostsOn && !(cfSys && davSys)) NetDns.parseHosts(hosts).error else null
+    val davDnsSummary = (if (dohEff) "DoH $dohCount 个" else "DoH 关") + " · " + (if (davSys) "系统 DNS 开" else "系统 DNS 关")
+    val hostsErr = if (hostsOn) NetDns.parseHosts(hosts).error else null
     val dohErr = if (dohEff) NetDns.dohError(doh) else null
     val dohWarn = if (dohEff && dohErr == null && hostsErr == null) NetDns.dohWarning(doh, if (hostsOn) hosts else "") else null
 
@@ -179,12 +175,12 @@ private fun RelaySettingsCardBody() {
         Field("Cloudflare 地址（域名或 xxx.workers.dev）", url) { url = it }
         Field("中转口令（RELAY_SECRET）", secret, secretField = true) { secret = it }
 
-        SwitchRow("Cloudflare 使用系统 DNS", cfSys, "开着时连 Cloudflare 不用 Host 映射，直接用系统 DNS") { cfSys = it }
+        SwitchRow("Cloudflare 使用系统 DNS", cfSys, "关闭后只认 Host 映射，没有映射的域名直接连不上，不会用系统 DNS") { cfSys = it }
 
         FoldSection("域名解析", dnsSummary) {
             Text(
                 "Host 映射：给域名指定 IP，填了的域名直接连这个 IP，不查 DNS，连不上自动换下一个。Cloudflare 和网盘共用这一份；" +
-                    "哪一路开了“使用系统 DNS”，那一路就不用它。没有映射的域名用系统 DNS（网盘可另开自建 DoH，在“网盘”里设置）。",
+                    "没有映射的域名：Cloudflare 看“使用系统 DNS”开关；网盘先试自建 DoH（在“网盘”里设置），再看开关。开关关着就连不上。",
                 fontSize = 12.sp, color = Gray
             )
             SwitchRow("使用 Host 映射", hostsOn, "关闭时下面填的内容保留但不使用，所有域名都不再用写死的 IP") { hostsOn = it }
@@ -204,20 +200,15 @@ private fun RelaySettingsCardBody() {
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
 
-            SwitchRow("网盘使用系统 DNS", davSys, "开着时连网盘不用 Host 映射，也不用自建 DoH，直接用系统 DNS") { davSys = it }
-            if (!davSys) {
-                Text(
-                    "自建 DoH（可选，默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
-                    fontSize = 12.sp, color = Gray
-                )
-                SwitchRow("使用自建 DoH", dohOn, "关闭时没有映射的网盘域名用系统 DNS；填的 DoH 地址会保留") { dohOn = it }
-                if (dohOn) {
-                    Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
-                    SwitchRow("DoH 失败时回退系统 DNS", dohFb, "默认关：关闭时 DoH 不可用就连不上；打开等于放回可能被劫持的系统 DNS") { dohFb = it }
-                }
-                dohErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
-                dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
-            }
+            Text(
+                "自建 DoH（可选，默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
+                fontSize = 12.sp, color = Gray
+            )
+            SwitchRow("使用自建 DoH", dohOn, "关闭时没有映射的网盘域名交给下面的系统 DNS；填的 DoH 地址会保留") { dohOn = it }
+            if (dohOn) Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
+            SwitchRow("网盘使用系统 DNS", davSys, "开着：没有映射、DoH 没开或没解析出来时用系统 DNS。关闭后只认 Host 映射和 DoH，都不行就连不上，不会用系统 DNS") { davSys = it }
+            dohErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
+            dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
         }
 
         HorizontalDivider(color = Color(0xFFEDEFF3))
