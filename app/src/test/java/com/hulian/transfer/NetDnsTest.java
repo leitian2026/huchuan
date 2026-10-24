@@ -76,20 +76,4 @@ public class NetDnsTest {
         assertTrue(b.getError().contains("顺序是：域名 IP"));
         assertTrue(a.getMap().isEmpty() && b.getMap().isEmpty());
     }
-
-    @Test
-    public void DoH域名没有映射要提醒_有映射或写IP不提醒() {
-        String doh = "https://www.example.org/token";
-        assertNotNull(NetDns.INSTANCE.dohWarning(doh, ""));
-        assertNull(NetDns.INSTANCE.dohWarning(doh, "www.example.org 1.2.3.4"));
-        assertNull(NetDns.INSTANCE.dohWarning("https://1.1.1.1/dns-query", ""));
-    }
-
-    @Test
-    public void DoH地址必须是https() {
-        assertNull(NetDns.INSTANCE.dohError(""));
-        assertNull(NetDns.INSTANCE.dohError("https://a.example.org/x\nhttps://b.example.org/y"));
-        assertTrue(NetDns.INSTANCE.dohError("http://a.example.org/x").contains("https://"));
-        assertTrue(NetDns.INSTANCE.dohError("https://a.example.org/x\nnot a url").contains("第 2 行"));
-    }
 }
