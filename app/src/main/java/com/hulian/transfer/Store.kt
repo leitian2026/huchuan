@@ -110,18 +110,14 @@ object Store {
     var hostsText: String
         get() = prefs.getString("dnsHosts", "") ?: ""
         set(v) { prefs.edit().putString("dnsHosts", v).apply() }
-    /** Cloudflare 是否直接用系统 DNS（默认关）。开着时不用 Host 映射，域名直接交给系统解析 */
+    /** Cloudflare 是否允许用系统 DNS（默认开）。关闭时只认 Host 映射，没有映射的域名直接连不上，绝不碰系统 DNS */
     var cfSysDns: Boolean
-        get() = prefs.getBoolean("dnsCfSys", false)
-        set(v) { prefs.edit().putBoolean("dnsCfSys", v).apply() }
-    /** 网盘是否直接用系统 DNS（默认关）。开着时既不用 Host 映射也不用自建 DoH */
+        get() = prefs.getBoolean("dnsCfSysOk", true)
+        set(v) { prefs.edit().putBoolean("dnsCfSysOk", v).apply() }
+    /** 网盘是否允许用系统 DNS（默认开）。关闭时只认 Host 映射和自建 DoH，都解析不了就连不上，绝不碰系统 DNS。开着时：DoH 没开或失败就用系统 DNS */
     var davSysDns: Boolean
-        get() = prefs.getBoolean("dnsDavSys", false)
-        set(v) { prefs.edit().putBoolean("dnsDavSys", v).apply() }
-    /** 网盘的 DoH 全部失败时是否回退到系统 DNS（默认不回退：回退等于把可能被劫持的系统 DNS 放回来） */
-    var dohFallback: Boolean
-        get() = prefs.getBoolean("dnsFb", false)
-        set(v) { prefs.edit().putBoolean("dnsFb", v).apply() }
+        get() = prefs.getBoolean("dnsDavSysOk", true)
+        set(v) { prefs.edit().putBoolean("dnsDavSysOk", v).apply() }
 
     /** 口令类设置用系统密钥库加密后再存 */
     private fun secret(k: String): String {
