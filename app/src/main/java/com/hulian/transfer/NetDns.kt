@@ -12,10 +12,10 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 公网请求的域名解析，防 DNS 劫持。Cloudflare（WebSocket）和网盘（WebDAV）各用一套，互不影响：
- *  0. “使用系统 DNS”（Cloudflare、网盘各有一个开关，默认关）：开着就跳过下面所有，这一路直接用系统 DNS
  *  1. Host 映射（设置里填：域名 → IP；有总开关，默认开；两路共用同一份）。命中就直接用，不发任何 DNS 查询；一个域名可以填多个 IP，连不上会依次换下一个
  *  2. 自建 DoH（只有网盘用；设置里的开关，默认关；可填多个，按顺序试）。只对没有 Host 映射的域名生效。加密 DNS，运营商看不到也改不了
- *  3. 系统 DNS：Cloudflare 没有映射的域名；网盘在 DoH 开关没开时用；DoH 开了但全部失败时，只有打开了“回退”才用（默认不回退，免得被劫持的答案又混进来）
+ *  3. 系统 DNS：由各自的“使用系统 DNS”开关决定（Cloudflare、网盘各一个，默认开）。开着：前面都没解析出来就用系统 DNS；
+ *     关着：绝不碰系统 DNS，前面都没解析出来就是连不上
  *
  * 局域网直连用的是 IP，不经过这里。
  * 注意：这只解决 DNS 被改；TLS 握手里的域名（SNI）仍是明文。
@@ -111,7 +111,7 @@ object NetDns {
             val u = line.toHttpUrlOrNull() ?: continue
             val h = u.host.lowercase()
             if (literal(h) != null) continue
-            if (map[h].isNullOrEmpty()) return "DoH 服务器 $h 没有 Host 映射，解析它要先走系统 DNS，可能被劫持。请在 Host 映射里加一行：$h IP"
+            if (map[h].isNullOrEmpty()) return "DoH 服务器 $h 没有 Host 映射，解析它要先走系统 DNS，可能被劫持（网盘关了“使用系统 DNS”时，这条 DoH 会直接不可用）。请在 Host 映射里加一行：$h IP"
         }
         return null
     }
@@ -137,39 +137,38 @@ object NetDns {
 
     fun resolve(hostname: String, chan: Chan): Result {
         val host = hostname.lowercase()
-
-        // 0. 这一路选了“使用系统 DNS”：Host 映射、DoH 都不用
-        val sys = if (chan == Chan.CF) Store.cfSysDns else Store.davSysDns
-        if (sys) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS（已开启“使用系统 DNS”）")
+        val sysOk = if (chan == Chan.CF) Store.cfSysDns else Store.davSysDns
 
         // 1. Host 映射（开关关着就整个跳过）
         activeHosts()[host]?.let { if (it.isNotEmpty()) return Result(it, "Host 映射") }
 
-        // 2. 自建 DoH 只给网盘用：Cloudflare 没有映射就直接系统 DNS。
-        //    网盘：开关没开或没填也用系统 DNS。局域网名字（nas.local、没有点的主机名等）公网 DoH 查不到，也走系统 DNS
-        val dohText = Store.dohUrl.trim()
-        if (chan == Chan.CF || !Store.dohOn || dohText.isEmpty() || isLocalName(host)) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS")
-
-        cache[host]?.let { if (System.currentTimeMillis() - it.at < TTL_MS) return it.r }
-
+        // 2. 自建 DoH 只给网盘用。局域网名字（nas.local、没有点的主机名等）公网 DoH 查不到，不走 DoH
         var last: Exception? = null
-        for (d in dohList(dohText)) {
-            try {
-                val a = ipv4First(d.lookup(hostname))
-                if (a.isNotEmpty()) {
-                    val r = Result(a, "自建 DoH")
-                    cache[host] = Cached(System.currentTimeMillis(), r)
-                    return r
+        var dohTried = false
+        val dohText = Store.dohUrl.trim()
+        if (chan == Chan.DAV && Store.dohOn && dohText.isNotEmpty() && !isLocalName(host)) {
+            cache[host]?.let { if (System.currentTimeMillis() - it.at < TTL_MS) return it.r }
+            for (d in dohList(dohText, sysOk)) {
+                dohTried = true
+                try {
+                    val a = ipv4First(d.lookup(hostname))
+                    if (a.isNotEmpty()) {
+                        val r = Result(a, "自建 DoH")
+                        cache[host] = Cached(System.currentTimeMillis(), r)
+                        return r
+                    }
+                } catch (e: Exception) {
+                    last = e
                 }
-            } catch (e: Exception) {
-                last = e
             }
         }
 
-        // 3. 回退（默认关闭）
-        if (Store.dohFallback) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), "系统 DNS（DoH 失败后回退）")
-        val why = last?.let { it.message ?: it.javaClass.simpleName } ?: "没有返回地址"
-        throw UnknownHostException("自建 DoH 解析 $hostname 失败：$why").also { if (last != null) it.initCause(last) }
+        // 3. 系统 DNS：开关开着才用；关着就是连不上
+        if (sysOk) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), if (dohTried) "系统 DNS（DoH 没解析出来，已回退）" else "系统 DNS")
+        val why = last?.let { it.message ?: it.javaClass.simpleName }
+        val msg = if (dohTried) "自建 DoH 解析 $hostname 失败：${why ?: "没有返回地址"}（已关闭“使用系统 DNS”，不回退）"
+        else "$hostname 没有 Host 映射" + (if (chan == Chan.DAV) "、没有可用的自建 DoH" else "") + "，且已关闭“使用系统 DNS”，没法解析"
+        throw UnknownHostException(msg).also { if (last != null) it.initCause(last) }
     }
 
     private fun isLocalName(h: String): Boolean =
@@ -180,8 +179,8 @@ object NetDns {
     private fun ipv4First(l: List<InetAddress>): List<InetAddress> = l.sortedBy { it is Inet6Address }
 
     /** 每行一个 DoH 地址。DoH 服务器自己的域名也先查 Host 映射（相当于 bootstrap），避免“解析 DoH 要先解析 DoH”的死循环 */
-    private fun dohList(text: String): List<DnsOverHttps> {
-        val key = text + "\n" + (if (Store.hostsOn) Store.hostsText else "")
+    private fun dohList(text: String, sysOk: Boolean): List<DnsOverHttps> {
+        val key = text + "\n" + (if (Store.hostsOn) Store.hostsText else "") + "\n" + sysOk
         dohCache?.let { if (it.first == key) return it.second }
         val hosts = activeHosts()
         val client = OkHttpClient.Builder()
@@ -193,6 +192,8 @@ object NetDns {
             if (url.scheme != "https") return@mapNotNull null
             val b = DnsOverHttps.Builder().client(client).url(url).includeIPv6(true).resolvePrivateAddresses(false)
             val boot = hosts[url.host.lowercase()]
+            // 关了“使用系统 DNS”时，DoH 服务器自己的域名没有映射就没法引导（引导会用系统 DNS），这一条跳过；直接写 IP 的不受影响
+            if (boot.isNullOrEmpty() && !sysOk && literal(url.host) == null) return@mapNotNull null
             if (!boot.isNullOrEmpty()) b.bootstrapDnsHosts(boot)
             b.build()
         }
