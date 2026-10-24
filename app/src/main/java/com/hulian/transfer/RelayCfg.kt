@@ -19,7 +19,9 @@ object RelayCfg {
         .put("u", Store.relayUrl).put("s", Store.relaySecret)
         .put("dv", Store.davProvider).put("du", Store.davUrl).put("dn", Store.davUser)
         .put("dp", Store.davPass).put("dd", Store.davDir)
-        .put("hs", Store.hostsText).put("ho", Store.hostsOn).put("so", Store.sysDnsOn)
+        .put("hs", Store.hostsText).put("ho", Store.hostsOn)
+        .put("dh", Store.dohUrl).put("do", Store.dohOn).put("df", Store.dohFallback)
+        .put("cs", Store.cfSysDns).put("ds", Store.davSysDns)
 
     /** 本机没有设置时才应用。成功返回 null；不接受就返回原因（会回给对方） */
     fun applyIfEmpty(j: JSONObject): String? {
@@ -45,7 +47,15 @@ object RelayCfg {
             Store.hostsText = hs
             if (j.has("ho")) Store.hostsOn = j.optBoolean("ho", true)
         }
-        if (j.has("so")) Store.sysDnsOn = j.optBoolean("so", true)
+        val dh = j.optString("dh").trim()
+        if (NetDns.dohError(dh) == null) {
+            Store.dohUrl = dh
+            Store.dohOn = j.optBoolean("do", false) && dh.isNotEmpty()
+            Store.dohFallback = j.optBoolean("df", false)
+        }
+        // 两路各自的“使用系统 DNS”：旧版本发来的没有这两项，保持本机默认（关）
+        if (j.has("cs")) Store.cfSysDns = j.optBoolean("cs", false)
+        if (j.has("ds")) Store.davSysDns = j.optBoolean("ds", false)
         Store.relayUrl = u
         Store.relaySecret = s
         Store.relayOn = true
