@@ -134,6 +134,10 @@ object Store {
     var quotaDownMb: Int
         get() = prefs.getInt("qDown", 3072).coerceAtLeast(1)
         set(v) { prefs.edit().putInt("qDown", v.coerceAtLeast(1)).apply() }
+    /** 坚果云网页的登录 Cookie（用来查账号真实的流量用量，见 DavQuota.syncFromWeb）。加密保存，不会被“复制配置”带走 */
+    var davCookie: String
+        get() = secret("jgyCookie")
+        set(v) = putSecret("jgyCookie", v)
     /** 每月几号刷新流量（1～31；这个月没有这一天就取月底）。坚果云按注册时间算周期，用户按自己的刷新日填 */
     var quotaResetDay: Int
         get() = prefs.getInt("qDay", 1).coerceIn(1, 31)
