@@ -3,14 +3,21 @@ package com.hulian.transfer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * 远程中转：两台手机不在同一个网络、也连不上热点时用。
@@ -19,7 +26,9 @@ import java.util.concurrent.ConcurrentHashMap
  *  - 网盘 WebDAV（坚果云 / InfiniCLOUD 等）：存放加密后的内容。发送方上传到“对方的文件夹”，对方收到通知后下载、解密、删除
  *
  * 内容在手机上用配对时交换的密钥加密（见 RelayCrypto），网盘和 Cloudflare 都看不到。
-
+ *
+ * 大文件（超过一个分段）会切成若干分段，几段同时上传（突破单条连接的速度上限），
+ * 每传完一段就通知对方，对方一边收一边写，不用等整个文件传完。文字和小文件仍是一个文件，和旧版本完全兼容。
  */
 object Relay {
     /** 给设置页显示的连接状态（出错时写明原因） */
@@ -45,6 +54,40 @@ object Relay {
     /** 消息里（已加密校验）的发送时间比这还早，就当作被人重放的旧文件 */
     private const val MAX_AGE_MS = 30L * 24 * 3600 * 1000
     private val midPattern = Regex("[A-Za-z0-9-]{1,64}")
+
+    /** 同时上传 / 下载几段 */
+    private const val PAR = 3
+    private const val MB = 1024L * 1024
+    /** 超过这个大小的文件才分段；每段的大小（文件很大时每段大一点，减少对网盘的请求次数） */
+    private fun partSize(size: Long): Long = if (size <= 256 * MB) 4 * MB else 8 * MB
+    /** 接收时接受的每段大小上限（防止对方在消息头里声明一个离谱的值） */
+    private const val MAX_PART = 64L * 1024 * 1024
+    /** 等一段上传出来的最长时间（期间没有任何新的分段通知） */
+    private const val PART_WAIT_MS = 120_000L
+
+    /** 正在接收的消息：对方每传完一段会来一条通知，这里记下来并唤醒等待的下载（事件驱动，不轮询） */
+    private class Live(val from: String?) {
+        val tick = MutableStateFlow(0)
+        val announced = ConcurrentHashMap.newKeySet<Int>()
+        @Volatile var aborted = false
+        /** 对方的通知可能丢了（本机刚上线 / 重连过）：不等通知，直接去网盘看有没有 */
+        @Volatile var optimistic = false
+        fun poke() = tick.update { it + 1 }
+    }
+
+    private val live = ConcurrentHashMap<String, Live>()
+
+    /** 分段文件接收到一半的状态：第 0 段已经写进文件，剩下的几段还要继续收 */
+    private class Multi(
+        val peer: Peer, val key: SecretKeySpec, val mid: String,
+        val job: Inbox.FileJob, val n: Int, val psz: Long
+    ) {
+        var got = 0L
+        var last = 0L
+    }
+
+    /** 对方中止了发送，或者很久没有继续上传：消息在聊天里已标成失败，不再弹框 */
+    private class PeerGoneException(msg: String, val aborted: Boolean, val n: Int) : IOException(msg)
 
     private fun markDone(mid: String) {
         synchronized(doneMids) {
@@ -165,6 +208,11 @@ object Relay {
                 connected.value = true
                 backoff = 2000L
                 state.value = if (Store.dav == null) "已连接（但${Store.davName}账号没填，收不到内容）" else "已连接"
+                // 断线重连：断开期间可能漏了分段通知，正在接收的文件直接去网盘看一眼
+                for (lv in live.values) {
+                    lv.optimistic = true
+                    lv.poke()
+                }
                 Hub.scope.launch { sweepInbox() }
             }
 
@@ -228,6 +276,24 @@ object Relay {
                         return
                     }
                     val mid = body.getString("mid")
+                    if (body.optBoolean("abort")) {   // 发送方失败 / 取消了：正在等分段的接收马上结束
+                        live[mid]?.takeIf { it.from == null || it.from == from }?.let {
+                            it.aborted = true
+                            it.poke()
+                        }
+                        return
+                    }
+                    val p = body.optInt("p", 0)
+                    if (p > 0) {   // 第 p 段传完了
+                        live[mid]?.takeIf { it.from == null || it.from == from }?.let {
+                            it.announced.add(p)
+                            it.poke()
+                        }
+                        return
+                    }
+                    if (!midPattern.matches(mid) || doneMids.contains(mid)) return
+                    // 先登记再启动接收：紧跟在后面的分段通知不会因为接收还没开始而丢掉
+                    live.computeIfAbsent(mid) { Live(from) }
                     Hub.scope.launch { receive(from, mid) }
                 }
                 "sent" -> acks.remove(j.optString("mid"))?.complete(j.optBoolean("online"))
@@ -277,6 +343,11 @@ object Relay {
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
         val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
+        val psz = partSize(size)
+        if (open != null && size > psz) {
+            sendParts(peer, header, size, open, onProgress, c, mid, psz)
+            return
+        }
         val meta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId).put("ts", now())
             .toString().toByteArray(Charsets.UTF_8)
         val key = RelayCrypto.key(peer.rk)
@@ -318,6 +389,175 @@ object Relay {
         }
     }
 
+    // ---------- 大文件：分段并行上传 ----------
+
+    /**
+     * 文件 = 第 0 段（$mid.bin，带消息头）+ 第 1.. 段（$mid-N.prt），每段是一个独立的加密文件，各自带一个被校验的小消息头
+     * （消息编号 / 发送者 / 第几段 / 这段多长），所以分段不能被调换、混进别的消息、截断或少收。
+     * 几段同时上传；第 0 段传完先通知对方开始收，之后每传完一段再通知一次
+     */
+    private suspend fun sendParts(
+        peer: Peer, header: JSONObject, size: Long, open: () -> InputStream, onProgress: (Long) -> Unit,
+        c: DavConfig, mid: String, psz: Long
+    ) {
+        val n = ((size + psz - 1) / psz).toInt()
+        val headMeta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId).put("ts", now())
+            .put("parts", n).put("psz", psz).toString().toByteArray(Charsets.UTF_8)
+        val key = RelayCrypto.key(peer.rk)
+        val sent = AtomicLong(0)
+        val lock = Any()
+        val uploaded = ConcurrentHashMap.newKeySet<Int>()
+        val headSent = CompletableDeferred<Unit>()
+        val headNotified = AtomicBoolean(false)
+        try {
+            withContext(Dispatchers.IO) {
+                WebDav.ensureDir(c, peer.id)
+                coroutineScope {
+                    val next = AtomicInteger(0)
+                    repeat(minOf(PAR, n)) {
+                        launch {
+                            while (true) {
+                                val i = next.getAndIncrement()
+                                if (i >= n) break
+                                uploadPart(c, peer, mid, key, headMeta, i, psz, size, open, sent, lock, onProgress)
+                                uploaded.add(i)
+                                if (i == 0) {
+                                    headNotified.set(true)
+                                    notifyHead(peer, mid)
+                                    headSent.complete(Unit)
+                                } else {
+                                    headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
+                                    sendNotify(peer, JSONObject().put("mid", mid).put("p", i))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            // 失败或被取消：通知对方别再等了，并把已经传上去的分段删掉
+            withContext(NonCancellable + Dispatchers.IO) {
+                if (headNotified.get()) {
+                    try {
+                        sock?.send(
+                            JSONObject().put("op", "notify").put("to", peer.id)
+                                .put("body", JSONObject().put("mid", mid).put("abort", true)).toString()
+                        )
+                    } catch (x: Exception) {
+                        Hub.log("Relay", x)
+                    }
+                }
+                for (i in uploaded) quietDelete(c, "${peer.id}/" + if (i == 0) "$mid.bin" else "$mid-$i.prt")
+            }
+            throw e
+        }
+    }
+
+    private suspend fun uploadPart(
+        c: DavConfig, peer: Peer, mid: String, key: SecretKeySpec, headMeta: ByteArray,
+        i: Int, psz: Long, size: Long, open: () -> InputStream,
+        sent: AtomicLong, lock: Any, onProgress: (Long) -> Unit
+    ) {
+        val plain = minOf(psz, size - i * psz)
+        val meta = if (i == 0) headMeta else JSONObject().put("mid", mid).put("from", Store.deviceId)
+            .put("idx", i).put("len", plain).toString().toByteArray(Charsets.UTF_8)
+        val total = RelayCrypto.encryptedSize(meta.size, plain)
+        val name = if (i == 0) "${peer.id}/$mid.bin" else "${peer.id}/$mid-$i.prt"
+        var attempt = 0
+        while (true) {
+            var last = 0L
+            try {
+                WebDav.put(c, name, total) { out ->
+                    val ins = open()
+                    try {
+                        skipFully(ins, i * psz)
+                        RelayCrypto.encrypt(key, meta, ins, out, onProgress = { v ->
+                            synchronized(lock) {
+                                sent.addAndGet(v - last)
+                                last = v
+                                onProgress(sent.get())
+                            }
+                        }, limit = plain)
+                    } finally {
+                        ins.close()
+                    }
+                }
+                return
+            } catch (e: WebDav.DavException) {
+                synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }   // 这一段要重传，进度退回去
+                val folderGone = e.code == 404 || e.code == 409
+                val busy = e.code == 429 || e.code in 500..599
+                if (attempt++ < 2 && (folderGone || busy)) {
+                    if (folderGone) {
+                        WebDav.forgetDirs()
+                        WebDav.ensureDir(c, peer.id)
+                    } else {
+                        delay(2000L * attempt)
+                    }
+                    continue
+                }
+                throw e
+            } catch (e: IOException) {
+                synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }
+                if (attempt++ < 2) {
+                    delay(1500L * attempt)
+                    continue
+                }
+                throw e
+            }
+        }
+    }
+
+    /** 跳过流的前 n 个字节（有的流 skip 可能一次跳不完，甚至返回 0） */
+    private fun skipFully(ins: InputStream, n: Long) {
+        var left = n
+        while (left > 0) {
+            val k = ins.skip(left)
+            if (k > 0) {
+                left -= k
+            } else {
+                if (ins.read() < 0) throw IOException("文件读取不完整")
+                left--
+            }
+        }
+    }
+
+    /** 第 0 段传完后的通知：和单文件一样，等 Cloudflare 确认 */
+    private suspend fun notifyHead(peer: Peer, mid: String) {
+        val ack = CompletableDeferred<Boolean>()
+        acks[mid] = ack
+        try {
+            sendNotify(peer, JSONObject().put("mid", mid))
+            withTimeout(15_000) { ack.await() }
+        } catch (e: TimeoutCancellationException) {
+            throw IOException("内容已上传到${Store.davName}，但 Cloudflare 15 秒内没有确认通知已发出", e)
+        } finally {
+            acks.remove(mid)
+        }
+    }
+
+    /** 发一条通知。刚好断线的话，等它重连上（等连接状态变化，不是轮询）最多 20 秒再发一次 */
+    private suspend fun sendNotify(peer: Peer, body: JSONObject) {
+        val msg = JSONObject().put("op", "notify").put("to", peer.id).put("body", body).toString()
+        var tries = 0
+        while (true) {
+            val s = sock
+            if (s != null && connected.value && s.send(msg)) return
+            if (tries++ >= 1) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接断开了")
+            withTimeoutOrNull(20_000) { connected.first { it } }
+        }
+    }
+
+    private fun quietDelete(c: DavConfig, name: String) {
+        try {
+            WebDav.delete(c, name)
+        } catch (e: WebDav.DavException) {
+            if (e.code != 404) Hub.log("删除中转文件", e)
+        } catch (e: Exception) {
+            Hub.log("删除中转文件", e)
+        }
+    }
+
     // ---------- 接收 ----------
 
     /** 连上 Cloudflare 后，把坚果云里留给本机的内容都收一遍（对方发的时候本机可能不在线） */
@@ -333,7 +573,12 @@ object Relay {
     /** 收一条：fromHint 是通知里的发送者（扫描网盘时未知，null）。从坚果云下载、解密、记入聊天、删除 */
     private suspend fun receive(fromHint: String?, mid: String) = withContext(Dispatchers.IO) {
         if (!midPattern.matches(mid)) return@withContext
-        if (doneMids.contains(mid) || !processing.add(mid)) return@withContext
+        if (doneMids.contains(mid)) {
+            live.remove(mid)
+            return@withContext
+        }
+        if (!processing.add(mid)) return@withContext
+        val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         try {
             val c = Store.dav ?: throw IOException("还没填${Store.davName}账号，收不到远程发来的内容")
             val peers = Hub.peers.value.values.filter {
@@ -345,8 +590,9 @@ object Relay {
                 return@withContext
             }
             val path = "${Store.deviceId}/$mid.bin"
+            var multi: Multi? = null
             try {
-                WebDav.get(c, path) { ins -> handleStream(peers, ins) }
+                WebDav.get(c, path) { ins -> multi = handleStream(mid, peers, ins) }
             } catch (e: WebDav.DavException) {
                 if (e.code == 404) {
                     markDone(mid) // 已经收过并删除了
@@ -354,7 +600,10 @@ object Relay {
                 }
                 throw e
             }
+            // 分段文件：第 0 段（上面）收完后，继续收后面的分段
+            multi?.let { finishMulti(c, it, lv) }
             markDone(mid)
+            multi?.let { deleteParts(c, mid, it.n) }
             try { WebDav.delete(c, path) } catch (e: Exception) { Hub.log("删除已收到的中转文件", e) }
         } catch (e: NoKeyException) {
             markDone(mid)
@@ -371,6 +620,16 @@ object Relay {
                 // 收到的是对方刚发来的通知，对方等着这条消息：仍然提示，但不删文件（下次扫描网盘时再判断）
                 Hub.report("远程接收失败", e, "消息：$mid")
             }
+        } catch (e: PeerGoneException) {
+            markDone(mid)
+            Hub.log("远程接收", e)   // 聊天里那条消息已经标成失败并写明了原因，不再弹框
+            if (!e.aborted) {
+                // 对方很久没有继续上传：把已经传上来的残留清掉，免得每次重连都再扫到
+                Store.dav?.let { d ->
+                    deleteParts(d, mid, e.n)
+                    quietDelete(d, "${Store.deviceId}/$mid.bin")
+                }
+            }
         } catch (e: StaleException) {
             markDone(mid)
             Hub.report("远程接收：已丢弃过旧的消息", e, "消息：$mid")
@@ -380,6 +639,7 @@ object Relay {
             Hub.report("远程接收失败", e, "消息：$mid")
         } finally {
             processing.remove(mid)
+            live.remove(mid)
         }
     }
 
@@ -389,9 +649,10 @@ object Relay {
     /** 消息太旧：不重试，也不留在网盘里 */
     private class StaleException(msg: String) : IOException(msg)
 
-    private fun handleStream(peers: List<Peer>, ins: InputStream) {
+    private fun handleStream(mid: String, peers: List<Peer>, ins: InputStream): Multi? {
         val reader = RelayCrypto.Reader(ins)
-        val (idx, metaBytes) = reader.open(peers.map { RelayCrypto.key(it.rk) })
+        val keys = peers.map { RelayCrypto.key(it.rk) }
+        val (idx, metaBytes) = reader.open(keys)
             ?: throw NoKeyException("无法解密：密钥对不上（对方用的不是和本机交换过的密钥，或者这不是发给本机的内容）")
         val peer = peers[idx]
         val meta = JSONObject(String(metaBytes, Charsets.UTF_8))
@@ -399,40 +660,134 @@ object Relay {
         // 旧版本发的没有 ts，照常收；有 ts 但太旧的，当作被重放的旧文件
         val ts = meta.optLong("ts", 0L)
         if (ts > 0 && now() - ts > MAX_AGE_MS) throw StaleException("这条远程消息是 30 天前发的，本机已经不收这么旧的内容（可能是被人重新放回网盘的旧文件）")
-        when (val type = meta.getString("type")) {
+        return when (val type = meta.getString("type")) {
             "text" -> {
                 val text = meta.getString("text")
                 if (text.length > Server.MAX_TEXT_LEN) throw IOException("文字太长")
                 Inbox.addText(peer.id, text)
+                null
             }
-            "file" -> receiveFile(peer, meta, reader)
+            "file" -> receiveFile(mid, peer, keys[idx], meta, reader)
             else -> throw IOException("不支持的消息类型：$type")
         }
     }
 
-    private fun receiveFile(peer: Peer, meta: JSONObject, reader: RelayCrypto.Reader) {
+    /** 单文件收完返回 null；分段文件只收完第 0 段，返回还要继续收的状态 */
+    private fun receiveFile(mid: String, peer: Peer, key: SecretKeySpec, meta: JSONObject, reader: RelayCrypto.Reader): Multi? {
         val job = Inbox.beginFile(peer.id, meta)
         try {
-            var got = 0L
-            var last = 0L
-            job.saved.stream.use { os ->
-                while (got < job.size) {
-                    val f = reader.next()
-                        ?: throw IOException("远程文件不完整：中途就结束了（已收到 ${fmtSize(got)} / ${fmtSize(job.size)}）")
-                    if (got + f.size > job.size) throw IOException("数据与声明的大小不符")
-                    os.write(f)
-                    got += f.size
-                    val t = now()
-                    if (t - last > 120) {
-                        last = t
-                        Inbox.progress(job, got)
-                    }
+            val parts = meta.optInt("parts", 1)
+            val psz = meta.optLong("psz", 0L)
+            if (parts > 1) {
+                if (meta.optString("mid") != mid) throw IOException("消息编号校验失败：文件名和消息里的编号对不上")
+                if (psz < RelayCrypto.CHUNK || psz > MAX_PART || parts.toLong() != (job.size + psz - 1) / psz) {
+                    throw IOException("分段信息无效")
                 }
             }
+            val want = if (parts > 1) psz else job.size   // 这个文件里应该有多少数据
+            var got = 0L
+            var last = 0L
+            val os = job.saved.stream
+            while (got < want) {
+                val f = reader.next()
+                    ?: throw IOException("远程文件不完整：中途就结束了（已收到 ${fmtSize(got)} / ${fmtSize(job.size)}）")
+                if (got + f.size > want) throw IOException("数据与声明的大小不符")
+                os.write(f)
+                got += f.size
+                val t = now()
+                if (t - last > 120) {
+                    last = t
+                    Inbox.progress(job, got)
+                }
+            }
+            if (parts > 1) return Multi(peer, key, mid, job, parts, psz).also { it.got = got }
+            os.close()
             Inbox.finishFile(peer.id, job)
+            return null
         } catch (e: Exception) {
+            try { job.saved.stream.close() } catch (x: Exception) { Hub.log("Relay", x) }
             Inbox.failFile(job, e)
             throw e
         }
+    }
+
+    /**
+     * 继续收第 1.. 段：同时下载 PAR 段，按顺序解密写进文件。
+     * 某一段还没传上来就等对方的分段通知（或重连 / 取消 / 超时），不轮询
+     */
+    private suspend fun finishMulti(c: DavConfig, m: Multi, lv: Live) {
+        try {
+            coroutineScope {
+                val jobs = ArrayList<Deferred<ByteArray>>()
+                var launched = 1
+                fun launchNext() {
+                    if (launched < m.n) {
+                        val i = launched++
+                        jobs.add(async(Dispatchers.IO) { fetchPart(c, m, i, lv) })
+                    }
+                }
+                repeat(PAR) { launchNext() }
+                for (i in 1 until m.n) {
+                    val raw = jobs[i - 1].await()
+                    launchNext()
+                    consumePart(raw, i, m)
+                }
+            }
+            m.job.saved.stream.close()
+            if (m.got != m.job.size) throw IOException("远程文件大小对不上（收到 ${fmtSize(m.got)} / ${fmtSize(m.job.size)}）")
+            Inbox.finishFile(m.peer.id, m.job)
+        } catch (e: Exception) {
+            try { m.job.saved.stream.close() } catch (x: Exception) { Hub.log("Relay", x) }
+            Inbox.failFile(m.job, e)
+            throw e
+        }
+    }
+
+    private suspend fun fetchPart(c: DavConfig, m: Multi, i: Int, lv: Live): ByteArray {
+        val name = "${Store.deviceId}/${m.mid}-$i.prt"
+        val max = m.psz + (m.psz / RelayCrypto.CHUNK + 2) * 20 + 4096
+        fun tryGet(): ByteArray? = try {
+            WebDav.getBytes(c, name, max)
+        } catch (e: WebDav.DavException) {
+            if (e.code == 404) null else throw e
+        }
+        while (true) {
+            if (lv.aborted) throw PeerGoneException("对方中止了发送（发送方出错或取消了）", true, m.n)
+            val seen = lv.tick.value   // 先记下，再去看：看的时候来的通知不会漏掉
+            if (lv.optimistic || i in lv.announced) tryGet()?.let { return it }
+            if (withTimeoutOrNull(PART_WAIT_MS) { lv.tick.first { it != seen } } == null) {
+                tryGet()?.let { return it }
+                throw PeerGoneException("对方 ${PART_WAIT_MS / 1000} 秒没有继续上传（第 ${i + 1} / ${m.n} 段）", false, m.n)
+            }
+        }
+    }
+
+    private fun consumePart(raw: ByteArray, i: Int, m: Multi) {
+        val reader = RelayCrypto.Reader(ByteArrayInputStream(raw))
+        val (_, metaBytes) = reader.open(listOf(m.key)) ?: throw IOException("第 ${i + 1} 段解不开：密钥对不上")
+        val pm = JSONObject(String(metaBytes, Charsets.UTF_8))
+        val want = minOf(m.psz, m.job.size - i * m.psz)
+        if (pm.optString("mid") != m.mid || pm.optString("from") != m.peer.id ||
+            pm.optInt("idx", -1) != i || pm.optLong("len", -1L) != want
+        ) throw IOException("第 ${i + 1} 段校验失败：不是这条消息的分段，或者被调换过")
+        val os = m.job.saved.stream
+        var got = 0L
+        while (got < want) {
+            val f = reader.next() ?: throw IOException("第 ${i + 1} 段不完整：中途就结束了")
+            if (got + f.size > want) throw IOException("第 ${i + 1} 段的数据与声明的大小不符")
+            os.write(f)
+            got += f.size
+            m.got += f.size
+            val t = now()
+            if (t - m.last > 120) {
+                m.last = t
+                Inbox.progress(m.job, m.got)
+            }
+        }
+        if (reader.next() != null) throw IOException("第 ${i + 1} 段的数据比声明的多")
+    }
+
+    private fun deleteParts(c: DavConfig, mid: String, n: Int) {
+        for (i in 1 until n) quietDelete(c, "${Store.deviceId}/$mid-$i.prt")
     }
 }
