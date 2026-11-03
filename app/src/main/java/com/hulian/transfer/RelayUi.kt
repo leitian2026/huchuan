@@ -338,6 +338,20 @@ private fun RelaySettingsCardBody() {
                 }
             }
         }
+        Row(horizontalArrangement = BtnRowGap) {
+            ActionBtn("清理网盘残留", enabled = !busy) {
+                save()
+                busy = true
+                Hub.scope.launch {
+                    try {
+                        Hub.toast(Relay.cleanupNow())
+                    } catch (e: Exception) {
+                        Hub.toast("清理失败：" + friendlyError(e))
+                    }
+                    busy = false
+                }
+            }
+        }
         if (dnsInfo.isNotEmpty()) Text(dnsInfo, fontSize = 12.sp, color = Gray)
     }
 }
