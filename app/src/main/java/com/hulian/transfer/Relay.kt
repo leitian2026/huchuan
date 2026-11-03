@@ -55,8 +55,6 @@ object Relay {
     private const val MAX_AGE_MS = 30L * 24 * 3600 * 1000
     private val midPattern = Regex("[A-Za-z0-9-]{1,64}")
 
-    /** 同时上传 / 下载几段 */
-    private const val PAR = 3
     private const val MB = 1024L * 1024
     /** 超过这个大小的文件才分段；每段的大小（文件很大时每段大一点，减少对网盘的请求次数） */
     private fun partSize(size: Long): Long = if (size <= 256 * MB) 4 * MB else 8 * MB
@@ -77,6 +75,8 @@ object Relay {
         /** 发送方点了暂停：它没有新分段是正常的，不算超时 */
         @Volatile var senderPaused = false
         @Volatile var pausedSince = 0L
+        /** 这条消息是谁发来的（收完后把本机的用量告诉它） */
+        @Volatile var peerId: String? = null
         fun poke() = tick.update { it + 1 }
     }
 
@@ -286,6 +286,8 @@ object Relay {
                         return
                     }
                     val mid = body.getString("mid")
+                    body.optJSONObject("q")?.let { DavQuota.peerReport(from, it) }   // 对方带来的坚果云用量
+                    if (body.optBoolean("qonly")) return   // 只是报用量
                     if (body.optBoolean("cancel")) {   // 接收方点了取消：发送方停止上传
                         sending[mid]?.takeIf { it.peerId == from }?.ctl?.cancelByPeer()
                         return
@@ -406,6 +408,7 @@ object Relay {
                 }
             }
         }
+        DavQuota.addUp(total)
         try {
             ctl?.check()
         } catch (e: UserCancelException) {
@@ -415,14 +418,14 @@ object Relay {
         val ack = CompletableDeferred<Boolean>()
         acks[mid] = ack
         try {
-            val msg = JSONObject().put("op", "notify").put("to", peer.id).put("body", JSONObject().put("mid", mid))
-            if (!s.send(msg.toString())) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接刚刚断开")
+            if (!s.send(notifyMsg(peer.id, JSONObject().put("mid", mid)))) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接刚刚断开")
             withTimeout(15_000) { ack.await() }
         } catch (e: TimeoutCancellationException) {
             throw IOException("内容已上传到${Store.davName}，但 Cloudflare 15 秒内没有确认通知已发出", e)
         } finally {
             acks.remove(mid)
         }
+        reportUsage(peer.id, mid)
     }
 
     // ---------- 大文件：分段并行上传 ----------
@@ -445,6 +448,7 @@ object Relay {
         val uploaded = ConcurrentHashMap.newKeySet<Int>()
         val headSent = CompletableDeferred<Unit>()
         val headNotified = AtomicBoolean(false)
+        val par = Store.relayParallel
         if (ctl != null) {
             ctl.canPause = true
             sending[mid] = Outgoing(peer.id, ctl)
@@ -488,12 +492,14 @@ object Relay {
                     }
                     coroutineScope {
                         val next = AtomicInteger(0)
-                        repeat(minOf(PAR, n)) {
+                        repeat(minOf(par, n)) {
                             launch {
                                 while (true) {
                                     ctl?.gate()   // 暂停中就停在这里，不开始新的分段；已经在传的会传完
                                     val i = next.getAndIncrement()
                                     if (i >= n) break
+                                    // 坚果云额度快满就在这里自动暂停（只拦新的一段，已经在传的传完）
+                                    DavQuota.ensureRoom(ctl, minOf(psz, size - i * psz), 0L, 1)
                                     uploadPart(c, peer, mid, key, headMeta, i, psz, size, open, sent, lock, onProgress, ctl)
                                     uploaded.add(i)
                                     if (i == 0) {
@@ -519,10 +525,7 @@ object Relay {
             withContext(NonCancellable + Dispatchers.IO) {
                 if (headNotified.get() && peer.id in online.value && ctl?.byPeer != true) {
                     try {
-                        sock?.send(
-                            JSONObject().put("op", "notify").put("to", peer.id)
-                                .put("body", JSONObject().put("mid", mid).put("abort", true)).toString()
-                        )
+                        sock?.send(notifyMsg(peer.id, JSONObject().put("mid", mid).put("abort", true)))
                     } catch (x: Exception) {
                         Hub.log("Relay", x)
                     }
@@ -564,6 +567,7 @@ object Relay {
                         ins.close()
                     }
                 }
+                DavQuota.addUp(total)
                 return
             } catch (e: WebDav.DavException) {
                 ctl?.check()   // 取消造成的失败不要重试
@@ -622,8 +626,24 @@ object Relay {
     }
 
     /** 发一条通知。刚好断线的话，等它重连上（等连接状态变化，不是轮询）最多 20 秒再发一次 */
+    /** 通知的内容：带上本机的坚果云用量，对方才能算出账号的总用量 */
+    private fun notifyMsg(to: String, body: JSONObject): String {
+        DavQuota.report()?.let { body.put("q", it) }
+        return JSONObject().put("op", "notify").put("to", to).put("body", body).toString()
+    }
+
+    /** 传完 / 收完后，把本机最新的用量告诉对方（对方在线才发） */
+    private suspend fun reportUsage(peerId: String, mid: String) {
+        if (Store.davProvider != "jgy" || peerId !in online.value) return
+        try {
+            sendNotify(peerId, JSONObject().put("mid", mid).put("qonly", true))
+        } catch (e: Exception) {
+            Hub.log("Relay", e)
+        }
+    }
+
     private suspend fun sendNotify(to: String, body: JSONObject) {
-        val msg = JSONObject().put("op", "notify").put("to", to).put("body", body).toString()
+        val msg = notifyMsg(to, body)
         var tries = 0
         while (true) {
             val s = sock
@@ -677,7 +697,11 @@ object Relay {
             }
             val path = "${Store.deviceId}/$mid.bin"
             try {
-                WebDav.get(c, path) { ins -> multi = handleStream(mid, peers, ins) }
+                WebDav.get(c, path) { ins ->
+                    val cin = CountingInputStream(ins)
+                    multi = handleStream(mid, peers, cin, lv)
+                    DavQuota.addDown(cin.count)
+                }
             } catch (e: WebDav.DavException) {
                 if (e.code == 404) {
                     markDone(mid) // 已经收过并删除了
@@ -690,6 +714,7 @@ object Relay {
             markDone(mid)
             multi?.let { deleteParts(c, mid, it.n) }
             try { WebDav.delete(c, path) } catch (e: Exception) { Hub.log("删除已收到的中转文件", e) }
+            lv.peerId?.let { reportUsage(it, mid) }
         } catch (e: NoKeyException) {
             markDone(mid)
             if (fromHint == null) {
@@ -752,12 +777,13 @@ object Relay {
     /** 消息太旧：不重试，也不留在网盘里 */
     private class StaleException(msg: String) : IOException(msg)
 
-    private fun handleStream(mid: String, peers: List<Peer>, ins: InputStream): Multi? {
+    private fun handleStream(mid: String, peers: List<Peer>, ins: InputStream, lv: Live): Multi? {
         val reader = RelayCrypto.Reader(ins)
         val keys = peers.map { RelayCrypto.key(it.rk) }
         val (idx, metaBytes) = reader.open(keys)
             ?: throw NoKeyException("无法解密：密钥对不上（对方用的不是和本机交换过的密钥，或者这不是发给本机的内容）")
         val peer = peers[idx]
+        lv.peerId = peer.id
         val meta = JSONObject(String(metaBytes, Charsets.UTF_8))
         if (meta.optString("from") != peer.id) throw IOException("来源校验失败：消息里的发送者和密钥对应的设备不一致")
         // 旧版本发的没有 ts，照常收；有 ts 但太旧的，当作被重放的旧文件
@@ -819,11 +845,12 @@ object Relay {
     }
 
     /**
-     * 继续收第 1.. 段：同时下载 PAR 段，按顺序解密写进文件。
+     * 继续收第 1.. 段：同时下载几段（设置里的并行数），按顺序解密写进文件。
      * 某一段还没传上来就等对方的分段通知（或重连 / 取消 / 超时），不轮询
      */
     private suspend fun finishMulti(c: DavConfig, m: Multi, lv: Live) {
         val ctl = m.ctl
+        val par = Store.relayParallel
         ctl.onCancel = { lv.poke() }   // 取消时唤醒正在等分段通知的下载
         try {
             ctl.check()
@@ -835,11 +862,12 @@ object Relay {
                         val i = launched++
                         jobs.add(async(Dispatchers.IO) {
                             ctl.gate()   // 暂停中就不开始下载新的分段
+                            DavQuota.ensureRoom(ctl, 0L, m.psz, 2)   // 坚果云额度快满就自动暂停；2 = 下载 1 次 + 收完后删除 1 次
                             fetchPart(c, m, i, lv)
                         })
                     }
                 }
-                repeat(PAR) { launchNext() }
+                repeat(par) { launchNext() }
                 for (i in 1 until m.n) {
                     val raw = jobs[i - 1].await()
                     launchNext()
@@ -864,7 +892,7 @@ object Relay {
         val name = "${Store.deviceId}/${m.mid}-$i.prt"
         val max = m.psz + (m.psz / RelayCrypto.CHUNK + 2) * 20 + 4096
         fun tryGet(): ByteArray? = try {
-            WebDav.getBytes(c, name, max, m.ctl)
+            WebDav.getBytes(c, name, max, m.ctl).also { DavQuota.addDown(it.size.toLong()) }
         } catch (e: WebDav.DavException) {
             if (e.code == 404) null else throw e
         }
@@ -908,7 +936,10 @@ object Relay {
         if (reader.next() != null) throw IOException("第 ${i + 1} 段的数据比声明的多")
     }
 
-    private fun deleteParts(c: DavConfig, mid: String, n: Int) {
-        for (i in 1 until n) quietDelete(c, "${Store.deviceId}/$mid-$i.prt")
+    private suspend fun deleteParts(c: DavConfig, mid: String, n: Int) {
+        for (i in 1 until n) {
+            DavQuota.awaitRequests(1)   // 请求次数快满就等一等再删，别因为清理把额度用光
+            quietDelete(c, "${Store.deviceId}/$mid-$i.prt")
+        }
     }
 }
