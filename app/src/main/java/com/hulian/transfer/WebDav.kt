@@ -18,18 +18,23 @@ import java.util.concurrent.TimeUnit
 class DavConfig(val url: String, val user: String, val pass: String, val dir: String)
 
 object Http {
-    private fun base(dns: okhttp3.Dns): OkHttpClient = OkHttpClient.Builder()
+    private fun base(dns: okhttp3.Dns, http1: Boolean = false): OkHttpClient = OkHttpClient.Builder()
         .dns(dns)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
+        .apply { if (http1) protocols(listOf(okhttp3.Protocol.HTTP_1_1)) }
         .build()
 
     /** Cloudflare 用：Host 映射 → 系统 DNS（开了“使用系统 DNS”就直接系统 DNS），见 NetDns */
     val client: OkHttpClient = base(NetDns.cf)
 
-    /** 网盘 WebDAV 用：Host 映射 → 自建 DoH → 系统 DNS（开了“使用系统 DNS”就直接系统 DNS），见 NetDns */
-    val dav: OkHttpClient = base(NetDns.dav)
+    /**
+     * 网盘 WebDAV 用：Host 映射 → 自建 DoH → 系统 DNS（开了“使用系统 DNS”就直接系统 DNS），见 NetDns。
+     * 固定用 HTTP/1.1：大文件分段并行上传时，每一段要各自占一条 TCP 连接才能叠加速度；
+     * 如果协商成 HTTP/2，几段会挤在同一条连接里，单连接的速度上限就没有被突破
+     */
+    val dav: OkHttpClient = base(NetDns.dav, http1 = true)
 
     /** WebSocket 长连接：不设读超时（心跳由应用自己发） */
     val ws: OkHttpClient by lazy { client.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
@@ -119,6 +124,14 @@ object WebDav {
     fun <T> get(c: DavConfig, sub: String, block: (InputStream) -> T): T {
         return call(builder(c, url(c, sub)).get().build(), "下载").use { block(it.body!!.byteStream()) }
     }
+
+    /** 下载一个不大的文件到内存；超过 max 字节就报错（免得对方 / 服务器塞个超大文件把内存撑爆） */
+    fun getBytes(c: DavConfig, sub: String, max: Long): ByteArray =
+        call(builder(c, url(c, sub)).get().build(), "下载").use { r ->
+            val src = r.body!!.source()
+            if (src.request(max + 1)) throw IOException("下载的文件比预期的大")
+            src.readByteArray()
+        }
 
     fun delete(c: DavConfig, sub: String) {
         call(builder(c, url(c, sub)).delete().build(), "删除").close()
