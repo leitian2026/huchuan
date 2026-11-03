@@ -172,7 +172,7 @@ object Store {
             val o = arr.getJSONObject(i)
             var st = MsgState.valueOf(o.optString("state", "DONE"))
             var err = o.optString("err")
-            if (st == MsgState.SENDING || st == MsgState.RECEIVING) {
+            if (st == MsgState.SENDING || st == MsgState.RECEIVING || st == MsgState.PAUSED) {
                 st = MsgState.FAILED
                 err = "已中断"
             }
