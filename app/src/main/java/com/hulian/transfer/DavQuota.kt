@@ -6,13 +6,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.util.Calendar
 import java.util.Locale
 
 /**
  * 坚果云的额度：每月上传 / 下载流量、每 30 分钟的请求次数（免费版 600 次，付费版 1500 次）。
  *
+ * 流量按“周期”算：每月几号刷新由用户在设置里填（坚果云按注册时间算周期，不是自然月），到日子自动清零，也可以手动“马上重置”。
  * 额度是整个账号共用的，两台手机都在用：本机自己数自己的用量，对方的用量由对方在每条通知里带过来（见 Relay），
  * 两边加起来才是账号的总用量。本机数不到的部分（网页端上传、别的 WebDAV 软件）可以在设置里“校准”。
  * 只统计坚果云；别的网盘没有这些限制，不统计也不暂停。
@@ -25,13 +25,21 @@ object DavQuota {
     private val sp by lazy { Hub.app.getSharedPreferences("hulian_quota", Context.MODE_PRIVATE) }
 
     private val stamps = ArrayDeque<Long>()   // 本机最近 30 分钟内发出的网盘请求的时间
-    private var month = ""
+    private var month = ""   // 当前流量周期的开始日期（yyyy-MM-dd）
+    private var cycleDay = 1   // 这个周期是按几号刷新算出来的
     private var up = 0L
     private var down = 0L
     private var calUp = 0L
     private var calDown = 0L
 
-    private class PeerUse(val month: String, val up: Long, val down: Long, val req: Int, val at: Long)
+    /** up / down 是对方报来的累计值；baseUp / baseDown 是本机“马上重置”时它已经报过的值，算用量时要减掉 */
+    private class PeerUse(
+        val month: String, val up: Long, val down: Long, val req: Int, val at: Long,
+        val baseUp: Long = 0L, val baseDown: Long = 0L
+    ) {
+        val upNet: Long get() = maxOf(up - baseUp, 0L)
+        val downNet: Long get() = maxOf(down - baseDown, 0L)
+    }
 
     private val peers = HashMap<String, PeerUse>()
     private var loaded = false
@@ -52,6 +60,7 @@ object DavQuota {
         if (loaded) return
         loaded = true
         month = sp.getString("m", "") ?: ""
+        cycleDay = sp.getInt("rd", Store.quotaResetDay)   // 旧版本没存过：当作和现在的设置一致
         up = sp.getLong("u", 0L)
         down = sp.getLong("d", 0L)
         calUp = sp.getLong("cu", 0L)
@@ -61,32 +70,61 @@ object DavQuota {
             val a = JSONObject(sp.getString("p", "{}") ?: "{}")
             for (k in a.keys()) {
                 val o = a.getJSONObject(k)
-                peers[k] = PeerUse(o.getString("m"), o.getLong("u"), o.getLong("d"), o.getInt("r"), o.getLong("t"))
+                peers[k] = PeerUse(o.getString("m"), o.getLong("u"), o.getLong("d"), o.getInt("r"), o.getLong("t"), o.optLong("bu", 0L), o.optLong("bd", 0L))
             }
         } catch (e: Exception) {
             Hub.log("DavQuota", e)
         }
     }
 
-    /** 换月了：流量清零（坚果云按月刷新） */
-    private fun roll() {
-        val m = SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
-        if (m != month) {
-            month = m
-            up = 0L
-            down = 0L
-            calUp = 0L
-            calDown = 0L
-            peers.clear()
-            persist()
+    /** 现在这个流量周期是哪天开始的：每月 day 号刷新（这个月没有这一天就取月底），今天还没到刷新日就是上个月的 */
+    private fun cycleKey(day: Int): String {
+        fun startDay(year: Int, month: Int): Int {
+            val c = Calendar.getInstance()
+            c.clear()
+            c.set(year, month, 1)
+            return minOf(day, c.getActualMaximum(Calendar.DAY_OF_MONTH))
         }
+        val now = Calendar.getInstance()
+        var y = now.get(Calendar.YEAR)
+        var m = now.get(Calendar.MONTH)
+        if (now.get(Calendar.DAY_OF_MONTH) < startDay(y, m)) {
+            m -= 1
+            if (m < 0) {
+                m = 11
+                y -= 1
+            }
+        }
+        return String.format(Locale.US, "%04d-%02d-%02d", y, m + 1, startDay(y, m))
+    }
+
+    /** 到了刷新日：流量清零。只是改了刷新日、或者从旧版本（按自然月）升级上来：用量保留，只换周期标记 */
+    private fun roll() {
+        val day = Store.quotaResetDay
+        val key = cycleKey(day)
+        if (key == month) return
+        if (cycleDay != day || (month.length == 7 && key.startsWith(month))) {
+            month = key
+            cycleDay = day
+            persist()
+            return
+        }
+        month = key
+        up = 0L
+        down = 0L
+        calUp = 0L
+        calDown = 0L
+        peers.clear()
+        persist()
     }
 
     private fun persist() {
         lastSave = System.currentTimeMillis()
         val p = JSONObject()
-        for ((k, v) in peers) p.put(k, JSONObject().put("m", v.month).put("u", v.up).put("d", v.down).put("r", v.req).put("t", v.at))
-        sp.edit().putString("m", month).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown)
+        for ((k, v) in peers) {
+            p.put(k, JSONObject().put("m", v.month).put("u", v.up).put("d", v.down).put("r", v.req).put("t", v.at).put("bu", v.baseUp).put("bd", v.baseDown))
+        }
+        sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown)
             .putString("s", stamps.joinToString(",")).putString("p", p.toString()).apply()
     }
 
@@ -94,9 +132,9 @@ object DavQuota {
         while (stamps.isNotEmpty() && now - stamps.first() > WINDOW_MS) stamps.removeFirst()
     }
 
-    private fun totalUp(): Long = up + calUp + peers.values.filter { it.month == month }.sumOf { it.up }
+    private fun totalUp(): Long = up + calUp + peers.values.filter { it.month == month }.sumOf { it.upNet }
 
-    private fun totalDown(): Long = down + calDown + peers.values.filter { it.month == month }.sumOf { it.down }
+    private fun totalDown(): Long = down + calDown + peers.values.filter { it.month == month }.sumOf { it.downNet }
 
     private fun totalReq(now: Long): Int {
         prune(now)
@@ -168,10 +206,17 @@ object DavQuota {
     fun peerReport(from: String, q: JSONObject) {
         if (!tracking) return
         try {
-            val u = PeerUse(q.getString("m"), q.getLong("u"), q.getLong("d"), q.getInt("r"), System.currentTimeMillis())
             synchronized(lock) {
                 load()
                 roll()
+                val prev = peers[from]
+                var bu = prev?.baseUp ?: 0L
+                var bd = prev?.baseDown ?: 0L
+                val ru = q.getLong("u")
+                val rd = q.getLong("d")
+                if (ru < bu) bu = 0L   // 对方自己也重置过了：它的计数从头开始
+                if (rd < bd) bd = 0L
+                val u = PeerUse(q.getString("m"), ru, rd, q.getInt("r"), System.currentTimeMillis(), bu, bd)
                 if (peers.size < 16 || peers.containsKey(from)) peers[from] = u
                 persist()
                 publish(u.at)
@@ -187,12 +232,40 @@ object DavQuota {
         synchronized(lock) {
             load()
             roll()
-            val pu = peers.values.filter { it.month == month }.sumOf { it.up }
-            val pd = peers.values.filter { it.month == month }.sumOf { it.down }
+            val pu = peers.values.filter { it.month == month }.sumOf { it.upNet }
+            val pd = peers.values.filter { it.month == month }.sumOf { it.downNet }
             if (upMb != null) calUp = upMb * MB - up - pu
             if (downMb != null) calDown = downMb * MB - down - pd
             persist()
             publish(System.currentTimeMillis())
+        }
+    }
+
+    /** 当前流量周期从哪天开始（设置页显示用） */
+    fun cycleStart(): String = synchronized(lock) {
+        load()
+        roll()
+        month
+    }
+
+    /**
+     * 马上重置：本机的用量和校准清零；对方已经报过的用量也不再算（它之后新增的会照常加上）。
+     * 只影响本机的显示和拦截；对方那边要它自己也点一下，或者等到下一个刷新日
+     */
+    fun resetNow() {
+        synchronized(lock) {
+            load()
+            roll()
+            up = 0L
+            down = 0L
+            calUp = 0L
+            calDown = 0L
+            val now = System.currentTimeMillis()
+            for ((k, v) in peers.toMap()) {
+                peers[k] = PeerUse(v.month, v.up, v.down, v.req, v.at, v.up, v.down)
+            }
+            persist()
+            publish(now)
         }
     }
 
