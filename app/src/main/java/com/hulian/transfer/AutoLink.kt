@@ -290,7 +290,7 @@ object AutoLink {
         Hub.scope.launch {
             var waited = 0
             while (waited < 600 && target == null &&
-                Hub.msgs.value.any { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }
+                Hub.msgs.value.any { it.active }
             ) {
                 delay(1000)
                 waited++
@@ -630,7 +630,7 @@ object AutoLink {
      * 有文件正在传输时不动（不能把传输掐断）。返回 true 表示确实关掉了东西，调用方要等一小会儿让系统拆完
      */
     fun releaseForPairing(): Boolean {
-        if (Hub.msgs.value.any { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }) return false
+        if (Hub.msgs.value.any { it.active }) return false
         val had = DirectGroup.up.value || DirectGroup.starting || HotspotJoin.active.value || P2pJoin.running
         target = null
         retryJob?.cancel()
@@ -657,7 +657,7 @@ object AutoLink {
         Hub.scope.launch {
             var waited = 0
             while (waited < 600 && !Hub.appVisible &&
-                Hub.msgs.value.any { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }
+                Hub.msgs.value.any { it.active }
             ) {
                 delay(1000)
                 waited++
