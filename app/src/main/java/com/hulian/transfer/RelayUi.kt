@@ -64,6 +64,7 @@ private fun RelaySettingsCardBody() {
     var qDown by remember { mutableStateOf(Store.quotaDownMb.toString()) }
     var qReq by remember { mutableStateOf(Store.quotaReq.toString()) }
     var qDay by remember { mutableStateOf(Store.quotaResetDay.toString()) }
+    var jgyCookie by remember { mutableStateOf(Store.davCookie) }
     var calUp by remember { mutableStateOf("") }
     var calDown by remember { mutableStateOf("") }
     val quota by DavQuota.snap.collectAsState()
@@ -89,6 +90,7 @@ private fun RelaySettingsCardBody() {
         Store.quotaDownMb = qDown.toIntOrNull() ?: 3072
         Store.quotaReq = qReq.toIntOrNull() ?: 600
         Store.quotaResetDay = qDay.toIntOrNull() ?: 1
+        Store.davCookie = jgyCookie.trim()
         DavQuota.refresh()
         NetDns.reset()
         WebDav.forgetDirs()
@@ -259,7 +261,33 @@ private fun RelaySettingsCardBody() {
                 Field("每月上传额度（MB，免费版 1024）", qUp) { qUp = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每月下载额度（MB，免费版 3072）", qDown) { qDown = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每 30 分钟请求上限（免费版 600，付费版 1500）", qReq) { qReq = it.filter { c -> c.isDigit() }.take(5) }
-                Text("校准：填坚果云 App 里看到的本月已用流量（MB），留空的不改", fontSize = 12.sp, color = Gray)
+                Text(
+                    "同步真实用量：粘贴坚果云网页的登录 Cookie（电脑浏览器登录坚果云，按 F12 打开“网络”，刷新页面，点开任意一条 jianguoyun.com 的请求，" +
+                        "复制“请求标头”里 Cookie 那一整串）。只存在本机、加密保存，不会被“复制配置”带走，只在点按钮时请求一次；Cookie 过期了要重新粘贴。" +
+                        "同步后额度、本周期已用、刷新日都按坚果云的真实数据改好。两台手机各自点一次。",
+                    fontSize = 12.sp, color = Gray
+                )
+                Field("坚果云网页 Cookie", jgyCookie, secretField = true) { jgyCookie = it }
+                Row(horizontalArrangement = BtnRowGap) {
+                    ActionBtn("同步真实用量", enabled = !busy) {
+                        save()
+                        busy = true
+                        Hub.scope.launch {
+                            try {
+                                val msg = DavQuota.syncFromWeb()
+                                qUp = Store.quotaUpMb.toString()
+                                qDown = Store.quotaDownMb.toString()
+                                qReq = Store.quotaReq.toString()
+                                qDay = Store.quotaResetDay.toString()
+                                Hub.toast(msg)
+                            } catch (e: Exception) {
+                                Hub.toast("同步失败：" + friendlyError(e))
+                            }
+                            busy = false
+                        }
+                    }
+                }
+                Text("校准：也可以手动填坚果云 App 里看到的本月已用流量（MB），留空的不改", fontSize = 12.sp, color = Gray)
                 Field("本月已用上传（MB）", calUp) { calUp = it.filter { c -> c.isDigit() }.take(7) }
                 Field("本月已用下载（MB）", calDown) { calDown = it.filter { c -> c.isDigit() }.take(7) }
                 Row(horizontalArrangement = BtnRowGap) {
