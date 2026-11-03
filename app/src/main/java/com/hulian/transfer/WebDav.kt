@@ -46,7 +46,7 @@ object WebDav {
 
     private val ensured = ConcurrentHashMap.newKeySet<String>()
     private val xml = "application/xml".toMediaType()
-    private const val PROPFIND_BODY = """<?xml version="1.0"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>"""
+    private const val PROPFIND_BODY = """<?xml version="1.0"?><propfind xmlns="DAV:"><prop><resourcetype/><getlastmodified/><getcontentlength/></prop></propfind>"""
 
     /** 网盘上的文件夹被删了之后，缓存的“已建好”记录要作废 */
     fun forgetDirs() = ensured.clear()
@@ -143,6 +143,35 @@ object WebDav {
 
     fun delete(c: DavConfig, sub: String) {
         call(builder(c, url(c, sub)).delete().build(), "删除").close()
+    }
+
+    /** 文件夹里的一个文件：名字、大小（字节）、最后修改时间（毫秒时间戳，服务器没给或解析不了是 0） */
+    class Entry(val name: String, val size: Long, val modified: Long)
+
+    /** 列出 sub 文件夹里的所有文件（不含子文件夹）；文件夹不存在返回空。清理残留用 */
+    fun listEntries(c: DavConfig, sub: String): List<Entry> {
+        val req = builder(c, url(c, sub)).header("Depth", "1")
+            .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
+        DavQuota.noteRequest()
+        return Http.dav.newCall(req).execute().use { r ->
+            if (r.code == 404) return@use emptyList<Entry>()
+            if (!r.isSuccessful) fail("查看文件夹", r.code)
+            val text = r.body!!.string()
+            val href = Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE)
+            val len = Regex("<(?:\\w+:)?getcontentlength>\\s*(\\d+)\\s*<", RegexOption.IGNORE_CASE)
+            val mod = Regex("<(?:\\w+:)?getlastmodified>\\s*([^<]+?)\\s*<", RegexOption.IGNORE_CASE)
+            val fmt = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US)
+            Regex("<(?:\\w+:)?response[\\s>][\\s\\S]*?</(?:\\w+:)?response>", RegexOption.IGNORE_CASE).findAll(text).mapNotNull { m ->
+                val b = m.value
+                val h = href.find(b)?.groupValues?.get(1) ?: return@mapNotNull null
+                if (h.trimEnd().endsWith("/")) return@mapNotNull null   // 文件夹本身
+                val name = URLDecoder.decode(h.trimEnd('/'), "UTF-8").substringAfterLast('/')
+                val t = mod.find(b)?.groupValues?.get(1)?.let { s ->
+                    try { fmt.parse(s)?.time } catch (e: Exception) { null }
+                } ?: 0L
+                Entry(name, len.find(b)?.groupValues?.get(1)?.toLongOrNull() ?: 0L, t)
+            }.toList()
+        }
     }
 
     /** 列出 sub 文件夹里的 .bin 文件名；文件夹不存在返回空 */
