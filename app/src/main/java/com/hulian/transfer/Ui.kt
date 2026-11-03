@@ -653,7 +653,8 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 val downLeft = (q.downLimit - q.downUsed).coerceAtLeast(0L)
                 val low = upLeft < q.upLimit / 5 || downLeft < q.downLimit / 5 || q.req >= q.reqLimit * 8 / 10
                 Text(
-                    "坚果云额度  上传剩 ${fmtSize(upLeft)} / ${fmtSize(q.upLimit)}  ·  下载剩 ${fmtSize(downLeft)} / ${fmtSize(q.downLimit)}  ·  请求 ${q.req} / ${q.reqLimit}（30 分钟）",
+                    "坚果云额度  上传剩 ${fmtSize(upLeft)} / ${fmtSize(q.upLimit)}  ·  下载剩 ${fmtSize(downLeft)} / ${fmtSize(q.downLimit)}  ·  请求 ${q.req} / ${q.reqLimit}（30 分钟）" +
+                        (if (q.resetAt > System.currentTimeMillis()) "  ·  ${(q.resetAt - System.currentTimeMillis() + 86_399_999L) / 86_400_000L} 天后刷新" else ""),
                     color = if (low) Color(0xFFE65100) else Gray,
                     fontSize = 12.sp,
                     modifier = Modifier.fillMaxWidth().background(Color(0xFFF1F6FC)).padding(horizontal = 12.dp, vertical = 4.dp)
