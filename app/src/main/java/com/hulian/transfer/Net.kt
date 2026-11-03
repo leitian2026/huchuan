@@ -49,9 +49,11 @@ object Net {
         )
     }
 
-    fun send(peer: Peer, header: JSONObject, open: (() -> InputStream)?, onProgress: (Long) -> Unit) {
+    fun send(peer: Peer, header: JSONObject, open: (() -> InputStream)?, onProgress: (Long) -> Unit, ctl: TransferCtl? = null) {
         val s = connectTo(peer, 6000, 10000)
         try {
+            ctl?.onCancel = { try { s.close() } catch (e: Exception) { Hub.log("Net", e) } }   // 取消：直接断开连接
+            ctl?.check()
             s.soTimeout = 60000
             val ch = Wire(s.getInputStream(), s.getOutputStream())
             ch.write(headerBytes(header))
@@ -341,7 +343,7 @@ object Server {
                             ok(ch)
                         }
                     }
-                    "file" -> receiveFile(pid, h, ch)
+                    "file" -> receiveFile(pid, h, ch, s)
                     "rk" -> {
                         // 更新前配对的设备：对方在直连时把远程中转密钥发过来（走 TLS 加密通道）。只在本机还没有密钥时接受
                         val k = h.optString("key")
@@ -421,13 +423,15 @@ object Server {
         Hub.hellos.tryEmit(id)
     }
 
-    private fun receiveFile(pid: String, h: JSONObject, ch: Wire) {
+    private fun receiveFile(pid: String, h: JSONObject, ch: Wire, s: Socket) {
         val job = try {
             Inbox.beginFile(pid, h)
         } catch (e: IOException) {
             try { no(ch, e.message ?: "对方拒绝接收") } catch (e2: Exception) { Hub.log("Net", e2) }
             return
         }
+        val ctl = Transfers.begin(job.id)
+        ctl.onCancel = { try { s.close() } catch (e: Exception) { Hub.log("Net", e) } }   // 取消：直接断开连接
         try {
             ok(ch) // 告诉对方可以开始发了
             var got = 0L
@@ -448,7 +452,9 @@ object Server {
             Inbox.finishFile(pid, job)
             ok(ch)
         } catch (e: Exception) {
-            Inbox.failFile(job, e)
+            if (ctl.cancelled) Inbox.cancelFile(job) else Inbox.failFile(job, e)
+        } finally {
+            Transfers.end(job.id, ctl)
         }
     }
 }
