@@ -61,7 +61,8 @@ object RelayCrypto {
         return MAGIC.size + 8L + (4 + metaLen + TAG) + frames * (4 + TAG) + dataLen
     }
 
-    fun encrypt(key: SecretKeySpec, meta: ByteArray, data: InputStream?, out: OutputStream, onProgress: (Long) -> Unit) {
+    /** limit：只加密 data 里的前 limit 字节（大文件分段时一段一段地加密）；data 不够 limit 字节会报错。默认读到结尾 */
+    fun encrypt(key: SecretKeySpec, meta: ByteArray, data: InputStream?, out: OutputStream, onProgress: (Long) -> Unit, limit: Long = Long.MAX_VALUE) {
         val prefix = ByteArray(8).also { SecureRandom().nextBytes(it) }
         out.write(MAGIC)
         out.write(prefix)
@@ -77,9 +78,12 @@ object RelayCrypto {
         if (data != null) {
             val buf = ByteArray(CHUNK)
             var total = 0L
-            while (true) {
-                val n = data.read(buf)
-                if (n < 0) break
+            while (total < limit) {
+                val n = data.read(buf, 0, minOf(buf.size.toLong(), limit - total).toInt())
+                if (n < 0) {
+                    if (limit != Long.MAX_VALUE) throw IOException("文件读取不完整（只读到 $total 字节，应有 $limit 字节）")
+                    break
+                }
                 if (n == 0) continue
                 frame(buf, n)
                 total += n
