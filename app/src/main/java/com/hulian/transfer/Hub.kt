@@ -651,7 +651,7 @@ object Hub {
             return
         }
         try {
-            Net.send(peer, h, open, onProgress, ctl)
+            Net.send(peer, h, open, ctl, onProgress)
         } catch (e: IOException) {
             if (ctl.cancelled) throw UserCancelException()
             if (!relayOk) throw e
