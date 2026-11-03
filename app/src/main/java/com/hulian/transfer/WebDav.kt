@@ -81,6 +81,7 @@ object WebDav {
         throw DavException(code, "${Store.davName}${op}失败：" + why(code) + "（HTTP $code）")
 
     private fun call(req: Request, op: String): Response {
+        DavQuota.noteRequest()
         val r = Http.dav.newCall(req).execute()
         if (!r.isSuccessful) {
             val code = r.code
@@ -91,6 +92,7 @@ object WebDav {
     }
 
     private fun mkcol(c: DavConfig, sub: String) {
+        DavQuota.noteRequest()
         val r = Http.dav.newCall(builder(c, url(c, sub)).method("MKCOL", null).build()).execute()
         r.use {
             // 201 新建；405 已经存在；有的服务器对已存在的文件夹回 301/302
@@ -147,6 +149,7 @@ object WebDav {
     fun listBins(c: DavConfig, sub: String): List<String> {
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
+        DavQuota.noteRequest()
         return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<String>()
             if (!r.isSuccessful) fail("查看文件夹", r.code)
