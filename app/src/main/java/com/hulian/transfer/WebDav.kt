@@ -112,22 +112,28 @@ object WebDav {
     }
 
     /** length 必须是准确的字节数（服务器要 Content-Length）；writer 往里写刚好这么多 */
-    fun put(c: DavConfig, sub: String, length: Long, writer: (OutputStream) -> Unit) {
+    fun put(c: DavConfig, sub: String, length: Long, tag: Any? = null, writer: (OutputStream) -> Unit) {
         val body = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
             override fun contentLength() = length
             override fun writeTo(sink: BufferedSink) { writer(sink.outputStream()) }
         }
-        call(builder(c, url(c, sub)).put(body).build(), "上传").close()
+        call(builder(c, url(c, sub)).put(body).tag(tag).build(), "上传").close()
     }
 
-    fun <T> get(c: DavConfig, sub: String, block: (InputStream) -> T): T {
-        return call(builder(c, url(c, sub)).get().build(), "下载").use { block(it.body!!.byteStream()) }
+    fun <T> get(c: DavConfig, sub: String, tag: Any? = null, block: (InputStream) -> T): T {
+        return call(builder(c, url(c, sub)).get().tag(tag).build(), "下载").use { block(it.body!!.byteStream()) }
+    }
+
+    /** 中断所有带这个标记的网盘请求（取消传输时用）：正在上传 / 下载的会马上抛出 IOException */
+    fun cancelCalls(tag: Any) {
+        for (call in Http.dav.dispatcher.runningCalls()) if (call.request().tag() === tag) call.cancel()
+        for (call in Http.dav.dispatcher.queuedCalls()) if (call.request().tag() === tag) call.cancel()
     }
 
     /** 下载一个不大的文件到内存；超过 max 字节就报错（免得对方 / 服务器塞个超大文件把内存撑爆） */
-    fun getBytes(c: DavConfig, sub: String, max: Long): ByteArray =
-        call(builder(c, url(c, sub)).get().build(), "下载").use { r ->
+    fun getBytes(c: DavConfig, sub: String, max: Long, tag: Any? = null): ByteArray =
+        call(builder(c, url(c, sub)).get().tag(tag).build(), "下载").use { r ->
             val src = r.body!!.source()
             if (src.request(max + 1)) throw IOException("下载的文件比预期的大")
             src.readByteArray()
