@@ -134,6 +134,10 @@ object Store {
     var quotaDownMb: Int
         get() = prefs.getInt("qDown", 3072).coerceAtLeast(1)
         set(v) { prefs.edit().putInt("qDown", v.coerceAtLeast(1)).apply() }
+    /** 每月几号刷新流量（1～31；这个月没有这一天就取月底）。坚果云按注册时间算周期，用户按自己的刷新日填 */
+    var quotaResetDay: Int
+        get() = prefs.getInt("qDay", 1).coerceIn(1, 31)
+        set(v) { prefs.edit().putInt("qDay", v.coerceIn(1, 31)).apply() }
     /** 每 30 分钟最多几次请求（免费版 600，付费版 1500） */
     var quotaReq: Int
         get() = prefs.getInt("qReq", 600).coerceAtLeast(10)
