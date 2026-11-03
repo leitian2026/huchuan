@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 class UserCancelException : IOException("已取消")
 
 /** 一条正在传输的消息的控制柄：界面上的暂停 / 继续 / 取消按钮通过它通知正在传的代码 */
-class TransferCtl {
+class TransferCtl(val id: String) {
     companion object {
         const val RUN = 0
         const val PAUSED = 1
@@ -30,6 +30,11 @@ class TransferCtl {
     /** 取消是对方发起的（界面上显示“对方取消了”） */
     @Volatile var byPeer = false
 
+    /** 额度快满了自动暂停时的原因；quotaBlocked：是流量额度（不会自动恢复）；overrideQuota：用户点了“继续”，这条传输不再按流量拦 */
+    @Volatile var autoReason = ""
+    @Volatile var quotaBlocked = false
+    @Volatile var overrideQuota = false
+
     val cancelled: Boolean get() = state.value == CANCELED
     val paused: Boolean get() = state.value == PAUSED
 
@@ -38,6 +43,26 @@ class TransferCtl {
         state.value = CANCELED   // 同时唤醒所有在“暂停”里等着的代码，它们醒来会发现已取消
         WebDav.cancelCalls(this)   // 这条传输的网盘请求都带着本对象做标记：正在进行的马上中断
         try { onCancel?.invoke() } catch (e: Exception) { Hub.log("Transfers", e) }
+    }
+
+    /** 额度快满了：自动暂停，并在聊天里写明原因。已经是暂停 / 取消状态就返回 false */
+    fun autoPause(reason: String, manual: Boolean): Boolean {
+        if (!state.compareAndSet(RUN, PAUSED)) return false
+        autoReason = reason
+        quotaBlocked = manual
+        canPause = true   // 界面上要有“继续”可点
+        Hub.patch(id) { if (it.active) it.copy(state = MsgState.PAUSED, error = reason) else it }
+        return true
+    }
+
+    /** 等够了（请求次数的窗口空出来了）：自动继续 */
+    fun autoResume() {
+        if (!state.compareAndSet(PAUSED, RUN)) return
+        autoReason = ""
+        quotaBlocked = false
+        Hub.patch(id) {
+            if (it.state == MsgState.PAUSED) it.copy(state = if (it.outgoing) MsgState.SENDING else MsgState.RECEIVING, error = "") else it
+        }
     }
 
     fun cancelByPeer() {
@@ -66,7 +91,7 @@ object Transfers {
     private val map = ConcurrentHashMap<String, TransferCtl>()
 
     /** 开始（或重新开始）一条消息的传输：换一个全新的控制柄 */
-    fun begin(id: String): TransferCtl = TransferCtl().also { map[id] = it }
+    fun begin(id: String): TransferCtl = TransferCtl(id).also { map[id] = it }
 
     fun get(id: String): TransferCtl? = map[id]
 
