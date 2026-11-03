@@ -58,6 +58,14 @@ private fun RelaySettingsCardBody() {
     var dnsInfo by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val state by Relay.state.collectAsState()
+    var parText by remember { mutableStateOf(Store.relayParallel.toString()) }
+    var quotaOn by remember { mutableStateOf(Store.quotaOn) }
+    var qUp by remember { mutableStateOf(Store.quotaUpMb.toString()) }
+    var qDown by remember { mutableStateOf(Store.quotaDownMb.toString()) }
+    var qReq by remember { mutableStateOf(Store.quotaReq.toString()) }
+    var calUp by remember { mutableStateOf("") }
+    var calDown by remember { mutableStateOf("") }
+    val quota by DavQuota.snap.collectAsState()
 
     fun save() {
         Store.davProvider = prov
@@ -74,6 +82,12 @@ private fun RelaySettingsCardBody() {
         Store.dohOn = dohOn
         Store.cfSysDns = cfSys
         Store.davSysDns = davSys
+        Store.relayParallel = parText.toIntOrNull() ?: 3
+        Store.quotaOn = quotaOn
+        Store.quotaUpMb = qUp.toIntOrNull() ?: 1024
+        Store.quotaDownMb = qDown.toIntOrNull() ?: 3072
+        Store.quotaReq = qReq.toIntOrNull() ?: 600
+        DavQuota.refresh()
         NetDns.reset()
         WebDav.forgetDirs()
         Relay.restart()
@@ -199,6 +213,11 @@ private fun RelaySettingsCardBody() {
             Field(cur.userLabel, davUser) { davUser = it }
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
+            Field("并行数（大文件同时传 / 收几段，1～8，默认 3）", parText) { parText = it.filter { c -> c.isDigit() }.take(1) }
+            Text(
+                "并行数越大越能叠加速度，但请求次数也烧得更快；坚果云没有公开并发上限，超出请求次数会被临时封号数小时。建议 3～4。",
+                fontSize = 12.sp, color = Gray
+            )
 
             Text(
                 "自建 DoH（可选，默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
@@ -209,6 +228,34 @@ private fun RelaySettingsCardBody() {
             SwitchRow("网盘使用系统 DNS", davSys, "开着：没有映射、DoH 没开或没解析出来时用系统 DNS。关闭后只认 Host 映射和 DoH，都不行就连不上，不会用系统 DNS") { davSys = it }
             dohErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
             dohWarn?.let { Text("提醒：$it", fontSize = 12.sp, color = Color(0xFFE08A00)) }
+        }
+
+        if (prov == "jgy") {
+            val q = quota
+            FoldSection(
+                "额度保护（坚果云）",
+                if (!quotaOn) "已关" else if (q == null) "开" else "上传剩 ${fmtSize((q.upLimit - q.upUsed).coerceAtLeast(0L))} · 下载剩 ${fmtSize((q.downLimit - q.downUsed).coerceAtLeast(0L))}"
+            ) {
+                Text(
+                    "额度是整个账号共用的：本机数自己的用量，对方的用量由对方在通知里带过来，加起来才是总用量。" +
+                        "网页端上传、别的 WebDAV 软件用掉的，本机数不到，可以在下面“校准”。每月 1 日按本机时间清零。",
+                    fontSize = 12.sp, color = Gray
+                )
+                SwitchRow("快到上限自动暂停", quotaOn, "请求次数用到上限的 90%、或剩下的月流量不够传下一段时，自动暂停并在聊天里写明原因") { quotaOn = it }
+                Field("每月上传额度（MB，免费版 1024）", qUp) { qUp = it.filter { c -> c.isDigit() }.take(7) }
+                Field("每月下载额度（MB，免费版 3072）", qDown) { qDown = it.filter { c -> c.isDigit() }.take(7) }
+                Field("每 30 分钟请求上限（免费版 600，付费版 1500）", qReq) { qReq = it.filter { c -> c.isDigit() }.take(5) }
+                Text("校准：填坚果云 App 里看到的本月已用流量（MB），留空的不改", fontSize = 12.sp, color = Gray)
+                Field("本月已用上传（MB）", calUp) { calUp = it.filter { c -> c.isDigit() }.take(7) }
+                Field("本月已用下载（MB）", calDown) { calDown = it.filter { c -> c.isDigit() }.take(7) }
+                Row(horizontalArrangement = BtnRowGap) {
+                    ActionBtn("校准用量") {
+                        save()
+                        DavQuota.calibrate(calUp.toLongOrNull(), calDown.toLongOrNull())
+                        Hub.toast("已校准")
+                    }
+                }
+            }
         }
 
         HorizontalDivider(color = Color(0xFFEDEFF3))
