@@ -404,7 +404,7 @@ object Hub {
 
                 val hotspotOn = HotspotHost.payload.value != null
                 if ((hotspotOn || (HotspotJoin.active.value && !HotspotJoin.autoMode)) && t - lastActivity > 180_000 &&
-                    _msgs.value.none { it.state == MsgState.SENDING || it.state == MsgState.RECEIVING }
+                    _msgs.value.none { it.active }
                 ) {
                     HotspotJoin.leave()
                     HotspotHost.stop()
@@ -429,7 +429,7 @@ object Hub {
             list.map {
                 if (it.id == id) {
                     val n = f(it)
-                    terminal = n.state == MsgState.DONE || n.state == MsgState.FAILED
+                    terminal = n.state == MsgState.DONE || n.state == MsgState.FAILED || n.state == MsgState.CANCELED
                     n
                 } else it
             }
@@ -527,12 +527,31 @@ object Hub {
     }
 
     fun retry(m: Msg) {
-        if (m.outgoing && m.state == MsgState.FAILED) doSend(m)
+        if (m.outgoing && (m.state == MsgState.FAILED || m.state == MsgState.CANCELED)) doSend(m)
+    }
+
+    /** 界面上的“取消”：传输代码收到后会停下来、清理，并把消息标成“已取消” */
+    fun cancelTransfer(id: String) {
+        Transfers.get(id)?.cancel()
+    }
+
+    /** 界面上的“暂停 / 继续”（只有远程中转的大文件有） */
+    fun togglePause(m: Msg) {
+        val ctl = Transfers.get(m.id) ?: return
+        if (!ctl.canPause) return
+        val pause = m.state != MsgState.PAUSED
+        ctl.setPaused(pause)
+        patch(m.id) {
+            if (it.state == MsgState.SENDING || it.state == MsgState.RECEIVING || it.state == MsgState.PAUSED) {
+                it.copy(state = if (pause) MsgState.PAUSED else if (it.outgoing) MsgState.SENDING else MsgState.RECEIVING)
+            } else it
+        }
     }
 
     private fun doSend(m: Msg) {
         scope.launch {
             patch(m.id) { it.copy(state = MsgState.SENDING, done = 0, error = "") }
+            val ctl = Transfers.begin(m.id)
             var cleanup: () -> Unit = {}
             try {
                 val peer = _peers.value[m.peerId] ?: throw IllegalStateException("设备不存在")
@@ -576,7 +595,7 @@ object Hub {
                 }
                 val t = total
                 var last = 0L
-                transport(peer, h, t, open) { done ->
+                transport(peer, h, t, open, ctl) { done ->
                     val n = now()
                     if (n - last > 120 || done == t) {
                         last = n
@@ -585,9 +604,14 @@ object Hub {
                 }
                 patch(m.id) { it.copy(state = MsgState.DONE, done = t) }
             } catch (e: Exception) {
-                patch(m.id) { it.copy(state = MsgState.FAILED, error = friendlyError(e)) }
+                if (ctl.cancelled) {
+                    patch(m.id) { it.copy(state = MsgState.CANCELED, error = if (ctl.byPeer) "对方取消了" else "") }
+                } else {
+                    patch(m.id) { it.copy(state = MsgState.FAILED, error = friendlyError(e)) }
+                }
             } finally {
                 cleanup()
+                Transfers.end(m.id, ctl)
             }
         }
     }
@@ -596,7 +620,8 @@ object Hub {
      * 选择传输方式：能直连就直连（快、不耗网盘额度）；对方离线、直连连不上，且远程中转已设置好，就改走 Cloudflare + 坚果云。
      * 两种都失败时，把两边的原因都告诉用户
      */
-    private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit) {
+    private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, ctl: TransferCtl, onProgress: (Long) -> Unit) {
+        ctl.check()
         val relayOk = Relay.ready(peer)
         // 同一个 Wi-Fi（或热点已经连上）：局域网直连又快又不占网盘，优先走直连，不管远程中转在不在线
         // 设置里“同一 Wi-Fi”和“热点”都关了：不走任何直连，只剩远程中转
@@ -606,31 +631,34 @@ object Hub {
         // 对方没连 Cloudflare 的话走远程它也收不到，所以这种情况不走
         if (!local && relayOk && Relay.connected.value && peer.id in Relay.online.value) {
             try {
-                Relay.send(peer, h, size, open, onProgress)
+                Relay.send(peer, h, size, open, onProgress, ctl)
                 return
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (ctl.cancelled) throw UserCancelException()   // 用户取消了：不要再换别的方式重发
                 if (!direct) throw IOException("远程中转失败（" + friendlyError(e) + "），同一 Wi-Fi 和热点在设置里都关着", e)
                 if (!peer.online) throw IOException("远程中转失败（" + friendlyError(e) + "），对方也没有直连在线", e)
                 // 对方直连在线：继续往下走原来的方式
             }
         }
         if (relayOk && !peer.online && Relay.connected.value) {
-            Relay.send(peer, h, size, open, onProgress)
+            Relay.send(peer, h, size, open, onProgress, ctl)
             return
         }
         if (!direct) {
             if (!relayOk) throw IOException("同一 Wi-Fi 和热点在设置里都关着，远程中转也没有设置好，没有可用的传输方式（设置 → 传输方式）")
-            Relay.send(peer, h, size, open, onProgress)
+            Relay.send(peer, h, size, open, onProgress, ctl)
             return
         }
         try {
-            Net.send(peer, h, open, onProgress)
+            Net.send(peer, h, open, onProgress, ctl)
         } catch (e: IOException) {
+            if (ctl.cancelled) throw UserCancelException()
             if (!relayOk) throw e
             try {
-                Relay.send(peer, h, size, open, onProgress)
+                Relay.send(peer, h, size, open, onProgress, ctl)
             } catch (e2: Exception) {
+                if (ctl.cancelled) throw UserCancelException()
                 throw IOException("直连失败（" + friendlyError(e) + "）；远程中转也失败了（" + friendlyError(e2) + "）", e2)
             }
         }
