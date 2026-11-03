@@ -62,6 +62,8 @@ object Relay {
     private const val MAX_PART = 64L * 1024 * 1024
     /** 等一段上传出来的最长时间（期间没有任何新的分段通知） */
     private const val PART_WAIT_MS = 120_000L
+    /** 孤儿分段（对应的 .bin 不在了）至少放了这么久才删，免得误删正在上传的 */
+    private const val ORPHAN_MIN_AGE_MS = 30L * 60 * 1000
     /** 对方暂停发送时，最多等它多久（防止对方的手机没了，这边一直等） */
     private const val SENDER_PAUSE_MAX_MS = 30L * 60 * 1000
 
@@ -669,7 +671,9 @@ object Relay {
     private suspend fun sweepInbox() = withContext(Dispatchers.IO) {
         try {
             val c = Store.dav ?: return@withContext
-            for (n in WebDav.listBins(c, Store.deviceId)) receive(null, n.removeSuffix(".bin"))
+            val entries = WebDav.listEntries(c, Store.deviceId)
+            for (e in entries) if (e.name.endsWith(".bin")) receive(null, e.name.removeSuffix(".bin"))
+            cleanupRemnants(c, entries, ORPHAN_MIN_AGE_MS)   // 收完了顺手把残留清掉（用的是同一份列表，不多发请求）
         } catch (e: Exception) {
             Hub.reportOnce("relay-sweep", "检查${Store.davName}里的未收消息失败", friendlyError(e), techDetail(e))
         }
@@ -934,6 +938,48 @@ object Relay {
             }
         }
         if (reader.next() != null) throw IOException("第 ${i + 1} 段的数据比声明的多")
+    }
+
+    /**
+     * 清理网盘上本机文件夹里的残留（发给本机的内容都在这个文件夹里）：
+     *  - 已经处理过的消息（收完了，或者已经失败结案）还留着的文件：.bin 没删掉、分段没删完
+     *  - 孤儿分段：对应的 .bin 不在了（发送方中途挂了；或者接收方放弃后发送方还在传），放够 minAgeMs 才删
+     * 正在接收的消息不碰。返回 (删了几个文件, 约释放多少字节)
+     */
+    private suspend fun cleanupRemnants(c: DavConfig, entries: List<WebDav.Entry>, minAgeMs: Long): Pair<Int, Long> {
+        val now = System.currentTimeMillis()
+        fun midOf(name: String): String? = when {
+            name.endsWith(".bin") -> name.removeSuffix(".bin")
+            name.endsWith(".prt") -> name.removeSuffix(".prt").substringBeforeLast('-', "")   // 消息编号本身带 '-'，最后一个 '-' 后面才是第几段
+            else -> null
+        }?.takeIf { midPattern.matches(it) }
+        val heads = entries.filter { it.name.endsWith(".bin") }.mapNotNull { midOf(it.name) }.toSet()
+        var n = 0
+        var bytes = 0L
+        for (e in entries) {
+            val mid = midOf(e.name) ?: continue
+            if (processing.contains(mid) || live.containsKey(mid)) continue
+            val done = doneMids.contains(mid)
+            val orphan = e.name.endsWith(".prt") && mid !in heads && e.modified > 0L && now - e.modified >= minAgeMs
+            if (!done && !orphan) continue
+            DavQuota.awaitRequests(1)   // 请求次数快满就等一等，别因为清理把额度用光
+            quietDelete(c, "${Store.deviceId}/${e.name}")
+            n++
+            bytes += e.size
+        }
+        return Pair(n, bytes)
+    }
+
+    /** 设置里的“清理网盘残留”：马上清一遍，返回给用户看的一句话 */
+    suspend fun cleanupNow(): String = withContext(Dispatchers.IO) {
+        val c = Store.dav ?: throw IOException("${Store.davName}的地址、账号、密码没有填全")
+        val entries = WebDav.listEntries(c, Store.deviceId)
+        val (n, bytes) = cleanupRemnants(c, entries, 10L * 60 * 1000)
+        if (n == 0) {
+            "没有需要清理的残留（本机文件夹里现在有 ${entries.size} 个文件，共 ${fmtSize(entries.sumOf { it.size })}）"
+        } else {
+            "已清理 $n 个残留文件，释放约 ${fmtSize(bytes)}"
+        }
     }
 
     private suspend fun deleteParts(c: DavConfig, mid: String, n: Int) {
