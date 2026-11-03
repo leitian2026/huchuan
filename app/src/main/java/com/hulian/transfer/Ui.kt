@@ -644,6 +644,22 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().background(Color(0xFFF1F6FC)).padding(horizontal = 12.dp, vertical = 4.dp)
             )
         }
+        // 坚果云额度：常显在对话框里，上传 / 下载了多少就少多少
+        val quota by DavQuota.snap.collectAsState()
+        LaunchedEffect(Unit) { DavQuota.refresh() }
+        quota?.let { q ->
+            if (peer != null && peer.paired && Store.relayOn) {
+                val upLeft = (q.upLimit - q.upUsed).coerceAtLeast(0L)
+                val downLeft = (q.downLimit - q.downUsed).coerceAtLeast(0L)
+                val low = upLeft < q.upLimit / 5 || downLeft < q.downLimit / 5 || q.req >= q.reqLimit * 8 / 10
+                Text(
+                    "坚果云额度  上传剩 ${fmtSize(upLeft)} / ${fmtSize(q.upLimit)}  ·  下载剩 ${fmtSize(downLeft)} / ${fmtSize(q.downLimit)}  ·  请求 ${q.req} / ${q.reqLimit}（30 分钟）",
+                    color = if (low) Color(0xFFE65100) else Gray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth().background(Color(0xFFF1F6FC)).padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
+        }
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("还没有传输记录", color = Gray, fontSize = 14.sp)
@@ -932,7 +948,7 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
     val status = when (m.state) {
         MsgState.SENDING -> "发送中 ${(pct * 100).toInt()}%"
         MsgState.RECEIVING -> "接收中 ${(pct * 100).toInt()}%"
-        MsgState.PAUSED -> "已暂停 ${(pct * 100).toInt()}%"
+        MsgState.PAUSED -> if (m.error.isNotEmpty()) "已暂停：${m.error}" else "已暂停 ${(pct * 100).toInt()}%"
         MsgState.CANCELED -> "已取消"
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
         MsgState.FAILED -> "失败"
