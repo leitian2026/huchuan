@@ -63,6 +63,7 @@ private fun RelaySettingsCardBody() {
     var qUp by remember { mutableStateOf(Store.quotaUpMb.toString()) }
     var qDown by remember { mutableStateOf(Store.quotaDownMb.toString()) }
     var qReq by remember { mutableStateOf(Store.quotaReq.toString()) }
+    var qDay by remember { mutableStateOf(Store.quotaResetDay.toString()) }
     var calUp by remember { mutableStateOf("") }
     var calDown by remember { mutableStateOf("") }
     val quota by DavQuota.snap.collectAsState()
@@ -87,6 +88,7 @@ private fun RelaySettingsCardBody() {
         Store.quotaUpMb = qUp.toIntOrNull() ?: 1024
         Store.quotaDownMb = qDown.toIntOrNull() ?: 3072
         Store.quotaReq = qReq.toIntOrNull() ?: 600
+        Store.quotaResetDay = qDay.toIntOrNull() ?: 1
         DavQuota.refresh()
         NetDns.reset()
         WebDav.forgetDirs()
@@ -126,7 +128,7 @@ private fun RelaySettingsCardBody() {
         val j = JSONObject().put("u", url.trim()).put("s", secret.trim()).put("du", davUrl.trim())
             .put("dn", davUser.trim()).put("dp", davPass.trim()).put("dd", davDir.trim()).put("dv", prov)
             .put("dh", doh.trim()).put("hs", hosts.trim()).put("do", dohOn).put("ho", hostsOn)
-            .put("cs", cfSys).put("ds", davSys)
+            .put("cs", cfSys).put("ds", davSys).put("qd", qDay.toIntOrNull() ?: 1)
         return "HLC1:" + Base64.encodeToString(j.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
@@ -155,6 +157,7 @@ private fun RelaySettingsCardBody() {
             // 旧版本导出的配置没有这两个开关：保持本机原样
             if (j.has("cs")) cfSys = j.getBoolean("cs")
             if (j.has("ds")) davSys = j.getBoolean("ds")
+            if (j.has("qd")) qDay = j.getInt("qd").toString()
             on = true
             save()
             Hub.toast("已导入并保存")
@@ -242,6 +245,17 @@ private fun RelaySettingsCardBody() {
                     fontSize = 12.sp, color = Gray
                 )
                 SwitchRow("快到上限自动暂停", quotaOn, "请求次数用到上限的 90%、或剩下的月流量不够传下一段时，自动暂停并在聊天里写明原因") { quotaOn = it }
+                Field("流量刷新日（每月几号，1～31；两台手机要填一样的）", qDay) { qDay = it.filter { c -> c.isDigit() }.take(2) }
+                Text(
+                    "当前周期从 ${DavQuota.cycleStart()} 开始，到下一个刷新日自动清零。改刷新日不会清掉已有的用量。",
+                    fontSize = 12.sp, color = Gray
+                )
+                Row(horizontalArrangement = BtnRowGap) {
+                    ActionBtn("马上重置本月用量") {
+                        DavQuota.resetNow()
+                        Hub.toast("已重置：本机的用量和校准清零，对方之前报的用量也不再算")
+                    }
+                }
                 Field("每月上传额度（MB，免费版 1024）", qUp) { qUp = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每月下载额度（MB，免费版 3072）", qDown) { qDown = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每 30 分钟请求上限（免费版 600，付费版 1500）", qReq) { qReq = it.filter { c -> c.isDigit() }.take(5) }
