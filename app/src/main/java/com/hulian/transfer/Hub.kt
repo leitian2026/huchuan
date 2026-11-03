@@ -540,10 +540,12 @@ object Hub {
         val ctl = Transfers.get(m.id) ?: return
         if (!ctl.canPause) return
         val pause = m.state != MsgState.PAUSED
+        // 流量额度快满时自动暂停的，用户点“继续”就是确认要继续：这条传输不再按流量拦
+        if (!pause && ctl.quotaBlocked) ctl.overrideQuota = true
         ctl.setPaused(pause)
         patch(m.id) {
             if (it.state == MsgState.SENDING || it.state == MsgState.RECEIVING || it.state == MsgState.PAUSED) {
-                it.copy(state = if (pause) MsgState.PAUSED else if (it.outgoing) MsgState.SENDING else MsgState.RECEIVING)
+                it.copy(state = if (pause) MsgState.PAUSED else if (it.outgoing) MsgState.SENDING else MsgState.RECEIVING, error = "")
             } else it
         }
     }
