@@ -4,7 +4,7 @@ import android.net.Uri
 import java.util.UUID
 
 enum class Kind { TEXT, FILE, APP }
-enum class MsgState { SENDING, RECEIVING, DONE, FAILED }
+enum class MsgState { SENDING, RECEIVING, PAUSED, DONE, FAILED, CANCELED }
 
 data class Peer(
     val id: String,
@@ -53,3 +53,6 @@ class PairPrompt(
     val isHost: Boolean,
     val decision: java.util.concurrent.CompletableFuture<Boolean>?
 )
+
+/** 正在传输（含已暂停）：自动联网、热点空闲关闭这些逻辑都把它当作“有传输在进行” */
+val Msg.active: Boolean get() = state == MsgState.SENDING || state == MsgState.RECEIVING || state == MsgState.PAUSED
