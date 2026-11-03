@@ -119,6 +119,26 @@ object Store {
         get() = prefs.getBoolean("dnsDavSysOk", true)
         set(v) { prefs.edit().putBoolean("dnsDavSysOk", v).apply() }
 
+    // ---------- 远程中转的并行数、坚果云额度保护（见 DavQuota） ----------
+    /** 大文件分段传输时同时传 / 收几段（1～8） */
+    var relayParallel: Int
+        get() = prefs.getInt("rPar", 3).coerceIn(1, 8)
+        set(v) { prefs.edit().putInt("rPar", v.coerceIn(1, 8)).apply() }
+    /** 坚果云额度快满时自动暂停（只对坚果云有效） */
+    var quotaOn: Boolean
+        get() = prefs.getBoolean("qOn", true)
+        set(v) { prefs.edit().putBoolean("qOn", v).apply() }
+    var quotaUpMb: Int
+        get() = prefs.getInt("qUp", 1024).coerceAtLeast(1)
+        set(v) { prefs.edit().putInt("qUp", v.coerceAtLeast(1)).apply() }
+    var quotaDownMb: Int
+        get() = prefs.getInt("qDown", 3072).coerceAtLeast(1)
+        set(v) { prefs.edit().putInt("qDown", v.coerceAtLeast(1)).apply() }
+    /** 每 30 分钟最多几次请求（免费版 600，付费版 1500） */
+    var quotaReq: Int
+        get() = prefs.getInt("qReq", 600).coerceAtLeast(10)
+        set(v) { prefs.edit().putInt("qReq", v.coerceAtLeast(10)).apply() }
+
     /** 口令类设置用系统密钥库加密后再存 */
     private fun secret(k: String): String {
         val s = prefs.getString(k, null)
