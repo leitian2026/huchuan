@@ -36,6 +36,9 @@ object DavQuota {
     private var calUp = 0L
     private var calDown = 0L
     private var resetAt = 0L   // 坚果云说的下次流量刷新时间（毫秒时间戳，同步真实用量时得到；0 = 不知道）
+    private var folderName = ""   // 本软件用的网盘文件夹，以及它在坚果云里占的空间（同步真实用量时得到；-1 = 不知道）
+    private var folderBytes = -1L
+    private val evStamps = ArrayList<Long>()   // 坚果云操作历史里该文件夹最近 30 分钟的操作时间：本机请求次数的下限，不落盘
 
     /** up / down 是对方报来的累计值；baseUp / baseDown 是本机“马上重置”时它已经报过的值，算用量时要减掉 */
     private class PeerUse(
@@ -53,7 +56,7 @@ object DavQuota {
     /** 界面显示用：已用 / 额度（上传、下载是账号本月的总用量，请求是最近 30 分钟的总次数） */
     class Snap(
         val upUsed: Long, val downUsed: Long, val upLimit: Long, val downLimit: Long,
-        val req: Int, val reqLimit: Int, val resetAt: Long
+        val req: Int, val reqLimit: Int, val resetAt: Long, val folderName: String, val folderBytes: Long
     )
 
     val snap = MutableStateFlow<Snap?>(null)
@@ -74,6 +77,8 @@ object DavQuota {
         calUp = sp.getLong("cu", 0L)
         calDown = sp.getLong("cd", 0L)
         resetAt = sp.getLong("ra", 0L)
+        folderName = sp.getString("fn", "") ?: ""
+        folderBytes = sp.getLong("fb", -1L)
         (sp.getString("s", "") ?: "").split(',').forEach { s -> s.toLongOrNull()?.let { stamps.addLast(it) } }
         try {
             val a = JSONObject(sp.getString("p", "{}") ?: "{}")
@@ -135,11 +140,13 @@ object DavQuota {
             p.put(k, JSONObject().put("m", v.month).put("u", v.up).put("d", v.down).put("r", v.req).put("t", v.at).put("bu", v.baseUp).put("bd", v.baseDown))
         }
         sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown).putLong("ra", resetAt)
+            .putString("fn", folderName).putLong("fb", folderBytes)
             .putString("s", stamps.joinToString(",")).putString("p", p.toString()).apply()
     }
 
     private fun prune(now: Long) {
         while (stamps.isNotEmpty() && now - stamps.first() > WINDOW_MS) stamps.removeFirst()
+        evStamps.removeAll { now - it > WINDOW_MS }
     }
 
     private fun totalUp(): Long = up + calUp + peers.values.filter { it.month == month }.sumOf { it.upNet }
@@ -148,11 +155,12 @@ object DavQuota {
 
     private fun totalReq(now: Long): Int {
         prune(now)
-        return stamps.size + peers.values.filter { now - it.at < WINDOW_MS }.sumOf { it.req }
+        val est = stamps.size + peers.values.filter { now - it.at < WINDOW_MS }.sumOf { it.req }
+        return maxOf(est, evStamps.size)   // 坚果云自己记到的文件操作数是真实请求数的下限，估算比它还少就以它为准
     }
 
     private fun publish(now: Long) {
-        snap.value = Snap(totalUp(), totalDown(), Store.quotaUpMb * MB, Store.quotaDownMb * MB, totalReq(now), Store.quotaReq, resetAt)
+        snap.value = Snap(totalUp(), totalDown(), Store.quotaUpMb * MB, Store.quotaDownMb * MB, totalReq(now), Store.quotaReq, resetAt, folderName, folderBytes)
     }
 
     // ---------- 对外 ----------
@@ -251,29 +259,67 @@ object DavQuota {
         }
     }
 
-    /**
-     * 从坚果云网页接口（/d/ajax/userop/getUserInfo）读账号真实的流量用量，并据此校准：
-     * 上传 / 下载额度、本周期已用、下次刷新时间（刷新日）、免费 / 付费对应的请求上限。
-     * 用的是用户从浏览器里复制来的登录 Cookie（加密保存在本机），只在点“同步”时请求一次。
-     * 返回给用户看的一句话，里面带着同步前本机的估算值，方便对照计数准不准
-     */
-    suspend fun syncFromWeb(): String = withContext(Dispatchers.IO) {
-        val cookie = Store.davCookie.trim().removePrefix("Cookie:").removePrefix("cookie:").trim().replace(Regex("[\\r\\n]+"), "")
-        if (cookie.isEmpty()) throw IOException("先粘贴坚果云网页的 Cookie")
+    private const val WEB = "https://www.jianguoyun.com"
+
+    /** 带着用户的登录 Cookie 请求坚果云网页的接口，返回响应正文 */
+    private fun webGet(cookie: String, path: String): String {
         val req = try {
-            Request.Builder().url("https://www.jianguoyun.com/d/ajax/userop/getUserInfo")
+            Request.Builder().url(WEB + path)
                 .header("Cookie", cookie)
-                .header("Referer", "https://www.jianguoyun.com/")
+                .header("Referer", "$WEB/")
                 .header("Accept", "application/json, text/plain, */*")
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
                 .get().build()
         } catch (e: IllegalArgumentException) {
             throw IOException("Cookie 里有不能用的字符：要整串从浏览器“请求标头”里复制")
         }
-        val text = Http.dav.newCall(req).execute().use { r ->
+        return Http.dav.newCall(req).execute().use { r ->
             if (!r.isSuccessful) throw IOException("坚果云网页返回 ${r.code}（Cookie 可能失效了）")
             r.body!!.string()
         }
+    }
+
+    /**
+     * 读文件夹的操作历史（/d/ajax/getEvents，一页 100 条，marker 翻页，marker 为 1 表示最后一页），
+     * 返回最近 30 分钟内的操作时间。历史里只有文件的增删改，不含下载和列目录，所以只能当请求次数的下限用
+     */
+    private fun fetchEvents(cookie: String, sndId: String, magic: String, now: Long): List<Long> {
+        val out = ArrayList<Long>()
+        var marker = 0L
+        var pages = 0
+        while (pages < 5) {
+            val q = "/d/ajax/getEvents?sndId=" + java.net.URLEncoder.encode(sndId, "UTF-8") +
+                "&sndMagic=" + java.net.URLEncoder.encode(magic, "UTF-8") + (if (marker != 0L) "&marker=$marker" else "")
+            val j = JSONObject(webGet(cookie, q))
+            val evs = j.optJSONArray("events") ?: break
+            var inWindow = false
+            for (i in 0 until evs.length()) {
+                var t = evs.optJSONObject(i)?.optLong("timestamp", 0L) ?: 0L
+                if (t in 1L..99_999_999_999L) t *= 1000L   // 秒 → 毫秒
+                if (t >= now - WINDOW_MS && t <= now + 5 * 60_000L) {
+                    out.add(t)
+                    inWindow = true
+                }
+            }
+            val next = j.optLong("marker", 1L)
+            pages++
+            if (next == 1L || evs.length() == 0 || (pages >= 2 && !inWindow)) break
+            marker = next
+        }
+        return out
+    }
+
+    /**
+     * 从坚果云网页接口（/d/ajax/userop/getUserInfo）读账号真实的流量用量，并据此校准：
+     * 上传 / 下载额度、本周期已用、下次刷新时间（刷新日）、免费 / 付费对应的请求上限；
+     * 同时读出本软件所用文件夹（hulian-relay）占了多少空间，以及它最近 30 分钟的操作历史条数。
+     * 用的是用户从浏览器里复制来的登录 Cookie（加密保存在本机），只在点“同步”时请求，不轮询。
+     * 返回给用户看的一句话，里面带着同步前本机的估算值，方便对照计数准不准
+     */
+    suspend fun syncFromWeb(): String = withContext(Dispatchers.IO) {
+        val cookie = Store.davCookie.trim().removePrefix("Cookie:").removePrefix("cookie:").trim().replace(Regex("[\\r\\n]+"), "")
+        if (cookie.isEmpty()) throw IOException("先粘贴坚果云网页的 Cookie")
+        val text = webGet(cookie, "/d/ajax/userop/getUserInfo")
         val j = try {
             JSONObject(text)
         } catch (e: Exception) {
@@ -290,6 +336,36 @@ object DavQuota {
         val leftMs = j.optLong("rateResetLeftMills", -1L)
         val now = System.currentTimeMillis()
         val at = if (leftMs > 0L) now + leftMs else 0L
+
+        // 本软件用的文件夹（WebDAV 根下的 hulian-relay）：占了多少空间，以及它的操作历史要用的编号
+        val folder = Store.davDir.ifBlank { "hulian-relay" }
+        var folderUsed = -1L
+        var sndId = ""
+        var sndMagic = ""
+        val arr = j.optJSONArray("sandboxes")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("name").equals(folder, ignoreCase = true)) {
+                    folderUsed = o.optLong("usedSpace", -1L)
+                    sndId = o.optString("sandboxId")
+                    sndMagic = o.optString("magic")
+                }
+            }
+        }
+        // 操作历史是可选的：读不到（接口变了、没找到文件夹）不影响同步
+        var events: List<Long> = emptyList()
+        var eventsNote = ""
+        if (sndId.isNotEmpty() && sndMagic.isNotEmpty()) {
+            try {
+                events = fetchEvents(cookie, sndId, sndMagic, now)
+            } catch (e: Exception) {
+                eventsNote = "（操作历史没读到：${friendlyError(e)}）"
+            }
+        } else {
+            eventsNote = "（没在坚果云里找到名叫 $folder 的文件夹，操作历史没读）"
+        }
+
         Store.quotaUpMb = (upLimit / MB).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
         Store.quotaDownMb = (downLimit / MB).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
         Store.quotaReq = if (j.optBoolean("freeUser", true)) 600 else 1500   // 官方帮助中心：免费版 600、付费版 1500
@@ -302,23 +378,31 @@ object DavQuota {
         }
         var estUp = 0L
         var estDown = 0L
+        var estReq = 0
         synchronized(lock) {
             load()
             roll()   // 刷新日改了：只换周期标记，本机的估算还在
             estUp = totalUp()
             estDown = totalDown()
+            estReq = totalReq(now)
             // 对方之前报的用量已经包含在真实值里了，只算它之后新增的
             for ((k, v) in peers.toMap()) peers[k] = PeerUse(v.month, v.up, v.down, v.req, v.at, v.up, v.down)
             calUp = upUsed - up
             calDown = downUsed - down
             resetAt = at
+            folderName = folder
+            folderBytes = folderUsed
+            evStamps.clear()
+            evStamps.addAll(events)
             persist()
             publish(now)
         }
         val days = if (at > 0L) (leftMs + 86_399_999L) / 86_400_000L else -1L
         "已同步：上传已用 ${fmtSize(upUsed)} / ${fmtSize(upLimit)}，下载已用 ${fmtSize(downUsed)} / ${fmtSize(downLimit)}" +
             (if (days >= 0) "，约 $days 天后刷新（刷新日已设为 $day 号）" else "") +
-            "。同步前本机估算：上传 ${fmtSize(estUp)}，下载 ${fmtSize(estDown)}"
+            (if (folderUsed >= 0) "，$folder 文件夹占 ${fmtSize(folderUsed)}" else "") +
+            "。同步前本机估算：上传 ${fmtSize(estUp)}，下载 ${fmtSize(estDown)}" +
+            (if (eventsNote.isEmpty()) "。坚果云记录的最近 30 分钟里有 ${events.size} 条文件操作；本机估算最近 30 分钟请求 $estReq 次（操作历史只含增删改、不含下载和列目录，所以条数应该不大于估算）" else eventsNote)
     }
 
     /** 当前流量周期从哪天开始（设置页显示用） */
