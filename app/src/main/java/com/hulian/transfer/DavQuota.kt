@@ -1,11 +1,15 @@
 package com.hulian.transfer
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Request
 import org.json.JSONObject
+import java.io.IOException
 import java.util.Calendar
 import java.util.Locale
 
@@ -31,6 +35,7 @@ object DavQuota {
     private var down = 0L
     private var calUp = 0L
     private var calDown = 0L
+    private var resetAt = 0L   // 坚果云说的下次流量刷新时间（毫秒时间戳，同步真实用量时得到；0 = 不知道）
 
     /** up / down 是对方报来的累计值；baseUp / baseDown 是本机“马上重置”时它已经报过的值，算用量时要减掉 */
     private class PeerUse(
@@ -46,7 +51,10 @@ object DavQuota {
     private var lastSave = 0L
 
     /** 界面显示用：已用 / 额度（上传、下载是账号本月的总用量，请求是最近 30 分钟的总次数） */
-    class Snap(val upUsed: Long, val downUsed: Long, val upLimit: Long, val downLimit: Long, val req: Int, val reqLimit: Int)
+    class Snap(
+        val upUsed: Long, val downUsed: Long, val upLimit: Long, val downLimit: Long,
+        val req: Int, val reqLimit: Int, val resetAt: Long
+    )
 
     val snap = MutableStateFlow<Snap?>(null)
 
@@ -65,6 +73,7 @@ object DavQuota {
         down = sp.getLong("d", 0L)
         calUp = sp.getLong("cu", 0L)
         calDown = sp.getLong("cd", 0L)
+        resetAt = sp.getLong("ra", 0L)
         (sp.getString("s", "") ?: "").split(',').forEach { s -> s.toLongOrNull()?.let { stamps.addLast(it) } }
         try {
             val a = JSONObject(sp.getString("p", "{}") ?: "{}")
@@ -114,6 +123,7 @@ object DavQuota {
         down = 0L
         calUp = 0L
         calDown = 0L
+        resetAt = 0L
         peers.clear()
         persist()
     }
@@ -124,7 +134,7 @@ object DavQuota {
         for ((k, v) in peers) {
             p.put(k, JSONObject().put("m", v.month).put("u", v.up).put("d", v.down).put("r", v.req).put("t", v.at).put("bu", v.baseUp).put("bd", v.baseDown))
         }
-        sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown)
+        sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown).putLong("ra", resetAt)
             .putString("s", stamps.joinToString(",")).putString("p", p.toString()).apply()
     }
 
@@ -142,7 +152,7 @@ object DavQuota {
     }
 
     private fun publish(now: Long) {
-        snap.value = Snap(totalUp(), totalDown(), Store.quotaUpMb * MB, Store.quotaDownMb * MB, totalReq(now), Store.quotaReq)
+        snap.value = Snap(totalUp(), totalDown(), Store.quotaUpMb * MB, Store.quotaDownMb * MB, totalReq(now), Store.quotaReq, resetAt)
     }
 
     // ---------- 对外 ----------
@@ -239,6 +249,76 @@ object DavQuota {
             persist()
             publish(System.currentTimeMillis())
         }
+    }
+
+    /**
+     * 从坚果云网页接口（/d/ajax/userop/getUserInfo）读账号真实的流量用量，并据此校准：
+     * 上传 / 下载额度、本周期已用、下次刷新时间（刷新日）、免费 / 付费对应的请求上限。
+     * 用的是用户从浏览器里复制来的登录 Cookie（加密保存在本机），只在点“同步”时请求一次。
+     * 返回给用户看的一句话，里面带着同步前本机的估算值，方便对照计数准不准
+     */
+    suspend fun syncFromWeb(): String = withContext(Dispatchers.IO) {
+        val cookie = Store.davCookie.trim().removePrefix("Cookie:").removePrefix("cookie:").trim().replace(Regex("[\\r\\n]+"), "")
+        if (cookie.isEmpty()) throw IOException("先粘贴坚果云网页的 Cookie")
+        val req = try {
+            Request.Builder().url("https://www.jianguoyun.com/d/ajax/userop/getUserInfo")
+                .header("Cookie", cookie)
+                .header("Referer", "https://www.jianguoyun.com/")
+                .header("Accept", "application/json, text/plain, */*")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
+                .get().build()
+        } catch (e: IllegalArgumentException) {
+            throw IOException("Cookie 里有不能用的字符：要整串从浏览器“请求标头”里复制")
+        }
+        val text = Http.dav.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("坚果云网页返回 ${r.code}（Cookie 可能失效了）")
+            r.body!!.string()
+        }
+        val j = try {
+            JSONObject(text)
+        } catch (e: Exception) {
+            throw IOException("返回的不是账户信息：Cookie 失效了或者没复制完整，请重新复制")
+        }
+        if (!j.has("usedUpRate") || !j.has("freeUpRate") || !j.has("usedDownRate") || !j.has("freeDownRate")) {
+            throw IOException("返回里没有流量数据：Cookie 可能失效了，或者坚果云改了接口")
+        }
+        val upUsed = j.getLong("usedUpRate")
+        val downUsed = j.getLong("usedDownRate")
+        val upLimit = upUsed + j.getLong("freeUpRate")
+        val downLimit = downUsed + j.getLong("freeDownRate")
+        if (upLimit <= 0L || downLimit <= 0L) throw IOException("返回的流量额度不对")
+        val leftMs = j.optLong("rateResetLeftMills", -1L)
+        val now = System.currentTimeMillis()
+        val at = if (leftMs > 0L) now + leftMs else 0L
+        Store.quotaUpMb = (upLimit / MB).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+        Store.quotaDownMb = (downLimit / MB).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+        Store.quotaReq = if (j.optBoolean("freeUser", true)) 600 else 1500   // 官方帮助中心：免费版 600、付费版 1500
+        var day = 0
+        if (at > 0L) {
+            val c = Calendar.getInstance()
+            c.timeInMillis = at
+            day = c.get(Calendar.DAY_OF_MONTH)
+            Store.quotaResetDay = day
+        }
+        var estUp = 0L
+        var estDown = 0L
+        synchronized(lock) {
+            load()
+            roll()   // 刷新日改了：只换周期标记，本机的估算还在
+            estUp = totalUp()
+            estDown = totalDown()
+            // 对方之前报的用量已经包含在真实值里了，只算它之后新增的
+            for ((k, v) in peers.toMap()) peers[k] = PeerUse(v.month, v.up, v.down, v.req, v.at, v.up, v.down)
+            calUp = upUsed - up
+            calDown = downUsed - down
+            resetAt = at
+            persist()
+            publish(now)
+        }
+        val days = if (at > 0L) (leftMs + 86_399_999L) / 86_400_000L else -1L
+        "已同步：上传已用 ${fmtSize(upUsed)} / ${fmtSize(upLimit)}，下载已用 ${fmtSize(downUsed)} / ${fmtSize(downLimit)}" +
+            (if (days >= 0) "，约 $days 天后刷新（刷新日已设为 $day 号）" else "") +
+            "。同步前本机估算：上传 ${fmtSize(estUp)}，下载 ${fmtSize(estDown)}"
     }
 
     /** 当前流量周期从哪天开始（设置页显示用） */
