@@ -49,7 +49,7 @@ object Net {
         )
     }
 
-    fun send(peer: Peer, header: JSONObject, open: (() -> InputStream)?, onProgress: (Long) -> Unit, ctl: TransferCtl? = null) {
+    fun send(peer: Peer, header: JSONObject, open: (() -> InputStream)?, ctl: TransferCtl? = null, onProgress: (Long) -> Unit) {
         val s = connectTo(peer, 6000, 10000)
         try {
             ctl?.onCancel = { try { s.close() } catch (e: Exception) { Hub.log("Net", e) } }   // 取消：直接断开连接
