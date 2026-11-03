@@ -283,6 +283,13 @@ object Relay {
                         }
                         return
                     }
+                    if (body.optBoolean("poke")) {   // 发送方说：本机刚上线，去网盘看一下有没有已经传好的分段
+                        live[mid]?.takeIf { it.from == null || it.from == from }?.let {
+                            it.optimistic = true
+                            it.poke()
+                        }
+                        return
+                    }
                     val p = body.optInt("p", 0)
                     if (p > 0) {   // 第 p 段传完了
                         live[mid]?.takeIf { it.from == null || it.from == from }?.let {
@@ -413,31 +420,51 @@ object Relay {
             withContext(Dispatchers.IO) {
                 WebDav.ensureDir(c, peer.id)
                 coroutineScope {
-                    val next = AtomicInteger(0)
-                    repeat(minOf(PAR, n)) {
-                        launch {
-                            while (true) {
-                                val i = next.getAndIncrement()
-                                if (i >= n) break
-                                uploadPart(c, peer, mid, key, headMeta, i, psz, size, open, sent, lock, onProgress)
-                                uploaded.add(i)
-                                if (i == 0) {
-                                    headNotified.set(true)
-                                    notifyHead(peer, mid)
-                                    headSent.complete(Unit)
-                                } else {
-                                    headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
-                                    sendNotify(peer, JSONObject().put("mid", mid).put("p", i))
+                    // 对方在传输中途上线：它错过了之前的分段通知，发一条“去网盘看一下”（等在线名单变化，不轮询）
+                    val watcher = launch {
+                        var was = peer.id in online.value
+                        online.collect { set ->
+                            val now = peer.id in set
+                            if (now && !was && headNotified.get()) {
+                                try {
+                                    sendNotify(peer, JSONObject().put("mid", mid).put("poke", true))
+                                } catch (e: Exception) {
+                                    Hub.log("Relay", e)
+                                }
+                            }
+                            was = now
+                        }
+                    }
+                    coroutineScope {
+                        val next = AtomicInteger(0)
+                        repeat(minOf(PAR, n)) {
+                            launch {
+                                while (true) {
+                                    val i = next.getAndIncrement()
+                                    if (i >= n) break
+                                    uploadPart(c, peer, mid, key, headMeta, i, psz, size, open, sent, lock, onProgress)
+                                    uploaded.add(i)
+                                    if (i == 0) {
+                                        headNotified.set(true)
+                                        notifyHead(peer, mid)
+                                        headSent.complete(Unit)
+                                    } else {
+                                        headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
+                                        // 对方不在线就不发：Cloudflare 会把每条通知都存起来（每台设备最多 200 条），
+                                        // 几十条分段通知会挤掉别的消息；对方上线后自己扫描网盘就能收到已传好的分段
+                                        if (peer.id in online.value) sendNotify(peer, JSONObject().put("mid", mid).put("p", i))
+                                    }
                                 }
                             }
                         }
                     }
+                    watcher.cancel()
                 }
             }
         } catch (e: Throwable) {
             // 失败或被取消：通知对方别再等了，并把已经传上去的分段删掉
             withContext(NonCancellable + Dispatchers.IO) {
-                if (headNotified.get()) {
+                if (headNotified.get() && peer.id in online.value) {
                     try {
                         sock?.send(
                             JSONObject().put("op", "notify").put("to", peer.id)
