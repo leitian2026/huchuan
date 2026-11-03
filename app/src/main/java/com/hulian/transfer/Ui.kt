@@ -564,7 +564,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     }
 
     fun onMsgClick(m: Msg) {
-        if (m.outgoing && m.state == MsgState.FAILED) {
+        if (m.outgoing && (m.state == MsgState.FAILED || m.state == MsgState.CANCELED)) {
             Hub.retry(m)
         } else if (!m.outgoing && m.state == MsgState.DONE && m.kind != Kind.TEXT && m.uri.isNotEmpty()) {
             val n = m.file.ifEmpty { m.name }
@@ -853,6 +853,12 @@ fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
                     modifier = Modifier.clickable(onClick = onClick).padding(top = 2.dp)
                 )
             }
+            if (m.state == MsgState.CANCELED && out) {
+                Text(
+                    "已取消" + (if (m.error.isNotEmpty()) "（${m.error}）" else "") + "（点击重新发送）", color = Gray, fontSize = 12.sp,
+                    modifier = Modifier.clickable(onClick = onClick).padding(top = 2.dp)
+                )
+            }
         }
         if (out) { Spacer(Modifier.width(8.dp)); Avatar("我") }
     }
@@ -871,8 +877,14 @@ fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
             Box(Modifier.clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick, onLongClick = { menu = true })) {
                 ChatImage(m, onFail = onFail)
             }
-            if (m.state == MsgState.SENDING) {
-                Text("发送中 ${(pct * 100).toInt()}%", fontSize = 12.sp, color = Gray, modifier = Modifier.padding(top = 2.dp))
+            if (m.state == MsgState.SENDING || m.state == MsgState.PAUSED) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        (if (m.state == MsgState.PAUSED) "已暂停 " else "发送中 ") + "${(pct * 100).toInt()}%",
+                        fontSize = 12.sp, color = Gray, modifier = Modifier.padding(top = 2.dp)
+                    )
+                    TransferButtons(m)
+                }
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -898,12 +910,30 @@ fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
     }
 }
 
+/** 传输中的“暂停 / 继续”和“取消”：没有控制柄（已经传完、或者是很快就传完的小文件）就不显示 */
+@Composable
+private fun TransferButtons(m: Msg) {
+    val ctl = Transfers.get(m.id) ?: return
+    Row {
+        if (ctl.canPause) {
+            TextButton(onClick = { Hub.togglePause(m) }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text(if (m.state == MsgState.PAUSED) "继续" else "暂停", fontSize = 13.sp)
+            }
+        }
+        TextButton(onClick = { Hub.cancelTransfer(m.id) }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Text("取消", fontSize = 13.sp, color = Color(0xFFE5484D))
+        }
+    }
+}
+
 @Composable
 fun FileCard(m: Msg, onClick: () -> Unit) {
     val pct = if (m.size > 0) (m.done.toFloat() / m.size).coerceIn(0f, 1f) else 0f
     val status = when (m.state) {
         MsgState.SENDING -> "发送中 ${(pct * 100).toInt()}%"
         MsgState.RECEIVING -> "接收中 ${(pct * 100).toInt()}%"
+        MsgState.PAUSED -> "已暂停 ${(pct * 100).toInt()}%"
+        MsgState.CANCELED -> "已取消"
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
         MsgState.FAILED -> "失败"
     }
@@ -927,9 +957,10 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
                     contentAlignment = Alignment.Center
                 ) { Text(badge, fontSize = 12.sp, color = Gray, fontWeight = FontWeight.Bold) }
             }
-            if (m.state == MsgState.SENDING || m.state == MsgState.RECEIVING) {
+            if (m.state == MsgState.SENDING || m.state == MsgState.RECEIVING || m.state == MsgState.PAUSED) {
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TransferButtons(m) }
             }
         }
     }
