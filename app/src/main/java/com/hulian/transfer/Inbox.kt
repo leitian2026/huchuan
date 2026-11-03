@@ -55,6 +55,12 @@ object Inbox {
         Notifier.message(pid, (if (j.isApp) "收到应用：" else "收到文件：") + j.title)
     }
 
+    /** 用户取消了接收（或对方取消了）：删掉写了一半的文件，消息标成“已取消” */
+    fun cancelFile(j: FileJob) {
+        Saver.delete(Hub.app, j.saved.uri)
+        Hub.patch(j.id) { it.copy(state = MsgState.CANCELED, error = "") }
+    }
+
     fun failFile(j: FileJob, e: Exception) {
         Saver.delete(Hub.app, j.saved.uri)
         Hub.log("接收文件", e)
