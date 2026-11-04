@@ -42,7 +42,8 @@ object Http {
 
 /** 最小的 WebDAV 客户端（坚果云 / InfiniCLOUD / 其他支持 WebDAV 的网盘通用）：建文件夹、上传、下载、删除、列目录 */
 object WebDav {
-    class DavException(val code: Int, msg: String) : IOException(msg)
+    /** blocked：服务器说“请求太频繁，被临时封了”（BlockedTemporarily）：这时重试只会封得更久，不能重试 */
+    class DavException(val code: Int, msg: String, val blocked: Boolean = false) : IOException(msg)
 
     private val ensured = ConcurrentHashMap.newKeySet<String>()
     private val xml = "application/xml".toMediaType()
@@ -77,26 +78,54 @@ object WebDav {
         else -> "网盘返回了意外的状态"
     }
 
-    private fun fail(op: String, code: Int): Nothing =
-        throw DavException(code, "${Store.davName}${op}失败：" + why(code) + "（HTTP $code）")
+    /** 出错响应里的正文（坚果云会在里面写具体原因，比如 BlockedTemporarily），最多取 2000 字符 */
+    private fun bodyOf(r: Response): String = try {
+        r.body?.string()?.take(2000) ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+
+    private fun fail(op: String, code: Int, body: String = ""): Nothing {
+        val blocked = body.contains("BlockedTemporarily", ignoreCase = true)
+        if (blocked) DavQuota.noteBlocked()
+        val detail = Regex("<(?:\\w+:)?message>([^<]*)<", RegexOption.IGNORE_CASE).find(body)?.groupValues?.get(1)?.trim().orEmpty()
+        val text = if (blocked) "请求太频繁，被坚果云临时封了（一般持续几小时），本软件会先暂停发请求" else why(code)
+        val more = if (detail.isNotEmpty() && !blocked) "，服务器说：$detail" else ""
+        throw DavException(code, "${Store.davName}${op}失败：$text（HTTP $code$more）", blocked)
+    }
+
+    /** 正在被坚果云限流封着：不再发请求（每多发一个请求都可能让封锁多持续一会儿） */
+    private fun checkNotBlocked(op: String) {
+        val left = DavQuota.blockedLeftMs()
+        if (left > 0L) {
+            throw DavException(
+                503,
+                "${Store.davName}${op}失败：坚果云正在限流（请求太频繁被临时封了），约 ${(left + 59_999L) / 60_000L} 分钟后再试（HTTP 503）",
+                true
+            )
+        }
+    }
 
     private fun call(req: Request, op: String): Response {
+        checkNotBlocked(op)
         DavQuota.noteRequest()
         val r = Http.dav.newCall(req).execute()
         if (!r.isSuccessful) {
             val code = r.code
+            val body = bodyOf(r)
             r.close()
-            fail(op, code)
+            fail(op, code, body)
         }
         return r
     }
 
     private fun mkcol(c: DavConfig, sub: String) {
+        checkNotBlocked("创建文件夹")
         DavQuota.noteRequest()
         val r = Http.dav.newCall(builder(c, url(c, sub)).method("MKCOL", null).build()).execute()
         r.use {
             // 201 新建；405 已经存在；有的服务器对已存在的文件夹回 301/302
-            if (it.code !in setOf(200, 201, 204, 301, 302, 405)) fail("创建文件夹", it.code)
+            if (it.code !in setOf(200, 201, 204, 301, 302, 405)) fail("创建文件夹", it.code, bodyOf(it))
         }
     }
 
@@ -152,10 +181,11 @@ object WebDav {
     fun listEntries(c: DavConfig, sub: String): List<Entry> {
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
+        checkNotBlocked("查看文件夹")
         DavQuota.noteRequest()
         return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<Entry>()
-            if (!r.isSuccessful) fail("查看文件夹", r.code)
+            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r))
             val text = r.body!!.string()
             val href = Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE)
             val len = Regex("<(?:\\w+:)?getcontentlength>\\s*(\\d+)\\s*<", RegexOption.IGNORE_CASE)
@@ -178,10 +208,11 @@ object WebDav {
     fun listBins(c: DavConfig, sub: String): List<String> {
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
+        checkNotBlocked("查看文件夹")
         DavQuota.noteRequest()
         return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<String>()
-            if (!r.isSuccessful) fail("查看文件夹", r.code)
+            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r))
             val text = r.body!!.string()
             Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE).findAll(text)
                 .map { URLDecoder.decode(it.groupValues[1].trimEnd('/'), "UTF-8").substringAfterLast('/') }
