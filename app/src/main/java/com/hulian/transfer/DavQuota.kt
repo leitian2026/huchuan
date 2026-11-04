@@ -23,6 +23,8 @@ import java.util.Locale
  */
 object DavQuota {
     private const val WINDOW_MS = 30L * 60 * 1000
+    /** 碰到 BlockedTemporarily 后先停多久再试探（有人报告会封几个小时，试探只发一个请求） */
+    private const val BLOCK_MS = 30L * 60 * 1000
     private const val MB = 1024L * 1024
 
     private val lock = Any()
@@ -35,6 +37,7 @@ object DavQuota {
     private var down = 0L
     private var calUp = 0L
     private var calDown = 0L
+    private var blockedUntil = 0L   // 被坚果云限流封着的话，封到什么时候（毫秒时间戳；我们自己估的，到点再试探一次）
     private var resetAt = 0L   // 坚果云说的下次流量刷新时间（毫秒时间戳，同步真实用量时得到；0 = 不知道）
     private var folderName = ""   // 本软件用的网盘文件夹，以及它在坚果云里占的空间（同步真实用量时得到；-1 = 不知道）
     private var folderBytes = -1L
@@ -77,6 +80,7 @@ object DavQuota {
         calUp = sp.getLong("cu", 0L)
         calDown = sp.getLong("cd", 0L)
         resetAt = sp.getLong("ra", 0L)
+        blockedUntil = sp.getLong("bu", 0L)
         folderName = sp.getString("fn", "") ?: ""
         folderBytes = sp.getLong("fb", -1L)
         (sp.getString("s", "") ?: "").split(',').forEach { s -> s.toLongOrNull()?.let { stamps.addLast(it) } }
@@ -139,7 +143,7 @@ object DavQuota {
         for ((k, v) in peers) {
             p.put(k, JSONObject().put("m", v.month).put("u", v.up).put("d", v.down).put("r", v.req).put("t", v.at).put("bu", v.baseUp).put("bd", v.baseDown))
         }
-        sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown).putLong("ra", resetAt)
+        sp.edit().putString("m", month).putInt("rd", cycleDay).putLong("u", up).putLong("d", down).putLong("cu", calUp).putLong("cd", calDown).putLong("ra", resetAt).putLong("bu", blockedUntil)
             .putString("fn", folderName).putLong("fb", folderBytes)
             .putString("s", stamps.joinToString(",")).putString("p", p.toString()).apply()
     }
@@ -164,6 +168,25 @@ object DavQuota {
     }
 
     // ---------- 对外 ----------
+
+    /** 碰到了坚果云的“请求太频繁，被临时封了”：先停一段时间，传输会自动暂停，到点再试探 */
+    fun noteBlocked() {
+        if (!tracking) return
+        synchronized(lock) {
+            load()
+            blockedUntil = System.currentTimeMillis() + BLOCK_MS
+            persist()
+        }
+    }
+
+    /** 还要被封多久（毫秒），没被封返回 0 */
+    fun blockedLeftMs(): Long {
+        if (!tracking) return 0L
+        return synchronized(lock) {
+            load()
+            maxOf(blockedUntil - System.currentTimeMillis(), 0L)
+        }
+    }
 
     /** 每发一个网盘请求就记一次（WebDav.call 里） */
     fun noteRequest() {
@@ -437,6 +460,11 @@ object DavQuota {
 
     /** 请求次数：用到上限的 90% 就停，等最早的那些请求滑出 30 分钟的窗口后自动继续 */
     private fun requestBlock(reqs: Int, now: Long): Block? {
+        val left = blockedUntil - now
+        if (left > 0L) {
+            val m = ((left + 59_999L) / 60_000L).coerceAtLeast(1L)
+            return Block("坚果云限流中（请求太频繁被临时封了），约 $m 分钟后自动继续", left + 1000L, false)
+        }
         val limit = Store.quotaReq
         val soft = limit * 9 / 10
         val used = totalReq(now)
