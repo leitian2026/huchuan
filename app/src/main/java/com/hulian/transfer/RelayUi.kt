@@ -65,6 +65,7 @@ private fun RelaySettingsCardBody() {
     var qReq by remember { mutableStateOf(Store.quotaReq.toString()) }
     var qDay by remember { mutableStateOf(Store.quotaResetDay.toString()) }
     var jgyCookie by remember { mutableStateOf(Store.davCookie) }
+    var showLogin by remember { mutableStateOf(false) }
     var calUp by remember { mutableStateOf("") }
     var calDown by remember { mutableStateOf("") }
     val quota by DavQuota.snap.collectAsState()
@@ -261,29 +262,41 @@ private fun RelaySettingsCardBody() {
                 Field("每月上传额度（MB，免费版 1024）", qUp) { qUp = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每月下载额度（MB，免费版 3072）", qDown) { qDown = it.filter { c -> c.isDigit() }.take(7) }
                 Field("每 30 分钟请求上限（免费版 600，付费版 1500）", qReq) { qReq = it.filter { c -> c.isDigit() }.take(5) }
+                fun syncNow() {
+                    save()
+                    busy = true
+                    Hub.scope.launch {
+                        try {
+                            val msg = DavQuota.syncFromWeb()
+                            qUp = Store.quotaUpMb.toString()
+                            qDown = Store.quotaDownMb.toString()
+                            qReq = Store.quotaReq.toString()
+                            qDay = Store.quotaResetDay.toString()
+                            Hub.toast(msg)
+                        } catch (e: Exception) {
+                            Hub.toast("同步失败：" + friendlyError(e))
+                        }
+                        busy = false
+                    }
+                }
                 Text(
-                    "同步真实用量：粘贴坚果云网页的登录 Cookie（电脑浏览器登录坚果云，按 F12 打开“网络”，刷新页面，点开任意一条 jianguoyun.com 的请求，" +
-                        "复制“请求标头”里 Cookie 那一整串）。只存在本机、加密保存，不会被“复制配置”带走，只在点按钮时请求一次；Cookie 过期了要重新粘贴。" +
-                        "同步后额度、本周期已用、刷新日都按坚果云的真实数据改好。两台手机各自点一次。",
+                    "同步真实用量：点“登录坚果云”，在弹出的坚果云官方登录页里登录（验证码、短信验证都在官方页面里完成，密码不经过本 App 的输入框），" +
+                        "登录成功后登录凭证（Cookie）自动取回、加密保存在本机，并马上同步一次；取完会清掉内置网页里的登录状态。" +
+                        "凭证过期了再点一次。也可以手动粘贴：电脑浏览器登录坚果云，按 F12 → 网络 → 点开一条 jianguoyun.com 的请求 → 复制“请求标头”里 Cookie 那一整串。" +
+                        "凭证不会被“复制配置”带走，只在点按钮时请求一次。同步后额度、本周期已用、刷新日都按坚果云的真实数据改好。两台手机各自点一次。",
                     fontSize = 12.sp, color = Gray
                 )
-                Field("坚果云网页 Cookie", jgyCookie, secretField = true) { jgyCookie = it }
+                Field("坚果云网页 Cookie（登录后自动填入，也可手动粘贴）", jgyCookie, secretField = true) { jgyCookie = it }
                 Row(horizontalArrangement = BtnRowGap) {
-                    ActionBtn("同步真实用量", enabled = !busy) {
-                        save()
-                        busy = true
-                        Hub.scope.launch {
-                            try {
-                                val msg = DavQuota.syncFromWeb()
-                                qUp = Store.quotaUpMb.toString()
-                                qDown = Store.quotaDownMb.toString()
-                                qReq = Store.quotaReq.toString()
-                                qDay = Store.quotaResetDay.toString()
-                                Hub.toast(msg)
-                            } catch (e: Exception) {
-                                Hub.toast("同步失败：" + friendlyError(e))
-                            }
-                            busy = false
+                    ActionBtn("登录坚果云", enabled = !busy) { showLogin = true }
+                    ActionBtn("同步真实用量", enabled = !busy) { syncNow() }
+                }
+                if (showLogin) {
+                    JgyLoginDialog { cookie ->
+                        showLogin = false
+                        if (cookie != null) {
+                            jgyCookie = cookie
+                            syncNow()
                         }
                     }
                 }
