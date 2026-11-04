@@ -5,6 +5,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -62,6 +64,9 @@ object Relay {
     private const val MAX_PART = 64L * 1024 * 1024
     /** 等一段上传出来的最长时间（期间没有任何新的分段通知） */
     private const val PART_WAIT_MS = 120_000L
+    /** 小文件（不分段）同时最多传几个：一次发好几张图片时，同时发起的上传太多，坚果云偶尔会回 503 */
+    private val singleGate = Semaphore(2)
+
     /** 孤儿分段（对应的 .bin 不在了）至少放了这么久才删，免得误删正在上传的 */
     private const val ORPHAN_MIN_AGE_MS = 30L * 60 * 1000
     /** 对方暂停发送时，最多等它多久（防止对方的手机没了，这边一直等） */
@@ -386,27 +391,37 @@ object Relay {
             .toString().toByteArray(Charsets.UTF_8)
         val key = RelayCrypto.key(peer.rk)
         val total = RelayCrypto.encryptedSize(meta.size, size)
-        withContext(Dispatchers.IO) {
-            var attempt = 0
-            while (true) {
-                try {
-                    WebDav.ensureDir(c, peer.id)
-                    WebDav.put(c, "${peer.id}/$mid.bin", total, ctl) { out ->
-                        val ins = open?.invoke()
-                        try {
-                            RelayCrypto.encrypt(key, meta, ins, out, onProgress)
-                        } finally {
-                            ins?.close()
+        singleGate.withPermit {
+            withContext(Dispatchers.IO) {
+                var attempt = 0
+                var busy = 0
+                while (true) {
+                    try {
+                        ctl?.check()
+                        WebDav.ensureDir(c, peer.id)
+                        WebDav.put(c, "${peer.id}/$mid.bin", total, ctl) { out ->
+                            val ins = open?.invoke()
+                            try {
+                                RelayCrypto.encrypt(key, meta, ins, out, onProgress)
+                            } finally {
+                                ins?.close()
+                            }
                         }
+                        break
+                    } catch (e: WebDav.DavException) {
+                        ctl?.check()
+                        // 网盘上的文件夹被删了：缓存作废，重建后重试一次
+                        if (attempt++ == 0 && (e.code == 404 || e.code == 409)) {
+                            WebDav.forgetDirs()
+                            continue
+                        }
+                        // 服务器一时忙（429 / 5xx）：等几秒再试，最多 2 次；被限流封了（BlockedTemporarily）重试只会封得更久，不试
+                        if (!e.blocked && (e.code == 429 || e.code in 500..599) && busy++ < 2) {
+                            delay(2000L * busy)
+                            continue
+                        }
+                        throw e
                     }
-                    break
-                } catch (e: WebDav.DavException) {
-                    // 网盘上的文件夹被删了：缓存作废，重建后重试一次
-                    if (attempt++ == 0 && (e.code == 404 || e.code == 409)) {
-                        WebDav.forgetDirs()
-                        continue
-                    }
-                    throw e
                 }
             }
         }
@@ -575,7 +590,7 @@ object Relay {
                 ctl?.check()   // 取消造成的失败不要重试
                 synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }   // 这一段要重传，进度退回去
                 val folderGone = e.code == 404 || e.code == 409
-                val busy = e.code == 429 || e.code in 500..599
+                val busy = !e.blocked && (e.code == 429 || e.code in 500..599)
                 if (attempt++ < 2 && (folderGone || busy)) {
                     if (folderGone) {
                         WebDav.forgetDirs()
