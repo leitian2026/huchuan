@@ -86,7 +86,7 @@ object Store {
             val u = davUrl.trim()
             val n = davUser.trim()
             val p = davPass
-            return if (u.isEmpty() || n.isEmpty() || p.isEmpty()) null else DavConfig(u, n, p, davDir.ifBlank { "hulian-relay" })
+            return if (u.isEmpty() || n.isEmpty() || p.isEmpty()) null else DavConfig(u, n, p, davDir.ifBlank { "hulian-relay" }, davProvider == "r2")
         }
 
     // ---------- 公网域名解析（防 DNS 劫持）：Host 映射（Cloudflare、网盘共用）+ 自建 DoH（只给网盘）+ 各自的“使用系统 DNS”开关，见 NetDns ----------
