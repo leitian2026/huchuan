@@ -53,6 +53,23 @@ object WebDav {
         val waitMs: Long = 0L, val queued: Boolean = false
     ) : IOException(msg)
 
+    /** 下载时连接被中途断开、内容没收完整（OkHttp 的 unexpected end of stream、读到空文件等）。收消息时头部阶段遇到它会自动重试 */
+    class StreamCutException(msg: String, cause: Throwable? = null) : IOException(msg, cause)
+
+    /** 这个异常（或它的原因）是不是“下载被中途断开 / 读到的比声明的短” */
+    private fun isCut(e: Throwable): Boolean {
+        var t: Throwable? = e
+        var n = 0
+        while (t != null && n < 4) {
+            if (t is java.net.ProtocolException || t is java.io.EOFException) return true
+            val m = t.message.orEmpty()
+            if (m.contains("unexpected end of stream", ignoreCase = true) || m.contains("中转文件是空的")) return true
+            t = t.cause
+            n++
+        }
+        return false
+    }
+
     // ---------- 429 通用退避（所有网盘都用，不依赖坚果云的额度统计） ----------
     // 任何网盘回 429（请求太多）：先停一段时间不发请求，免得一边被限速一边继续猛发、被限得更久。
     // 服务器给了 Retry-After 就照它等，没给就 30 秒起步、连续碰到就翻倍，最多 10 分钟；成功一次后清零。
@@ -235,7 +252,22 @@ object WebDav {
         else builder(c, url(c, sub)).get().tag(tag).build()
 
     fun <T> get(c: DavConfig, sub: String, tag: Any? = null, block: (InputStream) -> T): T {
-        return call(getReq(c, sub, tag), "下载").use { block(it.body!!.byteStream()) }
+        return call(getReq(c, sub, tag), "下载").use { r ->
+            val total = r.body!!.contentLength()   // 服务器声明的大小，-1 表示没给
+            val cin = CountingInputStream(r.body!!.byteStream())
+            try {
+                block(cin)
+            } catch (e: IOException) {
+                if (!isCut(e)) throw e
+                // 把“中途断开”单独标出来，并写清楚收到多少 / 声明多少，方便判断是一开始就断还是断在中间
+                val declared = if (total >= 0L) "${fmtSize(total)}（$total 字节）" else "没有声明"
+                throw StreamCutException(
+                    "${Store.davName}下载时连接被中途断开，内容没收完整：已收到 ${fmtSize(cin.count)}（${cin.count} 字节），服务器声明共 $declared。" +
+                        "常见原因：对方刚传完、网盘那边还没写好，或网络不稳；一般过几秒再收就好",
+                    e
+                )
+            }
+        }
     }
 
     /** 中断所有带这个标记的网盘请求（取消传输时用）：正在上传 / 下载的会马上抛出 IOException */
