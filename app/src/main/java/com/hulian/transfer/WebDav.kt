@@ -15,8 +15,7 @@ import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-/** s3=true：这是 Cloudflare R2（S3 接口）：url=桶地址，user=Access Key ID，pass=Secret，dir=对象名前缀 */
-class DavConfig(val url: String, val user: String, val pass: String, val dir: String, val s3: Boolean = false)
+class DavConfig(val url: String, val user: String, val pass: String, val dir: String)
 
 object Http {
     private fun base(dns: okhttp3.Dns, http1: Boolean = false): OkHttpClient = OkHttpClient.Builder()
@@ -64,7 +63,7 @@ object WebDav {
         throw IOException("${Store.davName}地址格式不对：$u（应该像 ${DavProviders.get(Store.davProvider).urlExample}）", e)
     }
 
-    private fun why(code: Int): String = if (Store.davProvider == "r2") whyR2(code) else when (code) {
+    private fun why(code: Int): String = when (code) {
         401 -> if (Store.davProvider == "jgy") "账号或应用密码不对（坚果云要用“应用密码”，不是登录密码；账号是注册邮箱）"
             else "账号或密码不对（要用网盘里单独生成的 WebDAV / 应用密码，不是登录密码）"
         403 -> "被网盘拒绝（可能是本月上传 / 下载流量用完了、请求太频繁被限制，或没有写入权限）"
@@ -77,15 +76,6 @@ object WebDav {
         507 -> "网盘空间不足"
         in 500..599 -> "网盘服务器出错"
         else -> "网盘返回了意外的状态"
-    }
-
-    private fun whyR2(code: Int): String = when (code) {
-        400 -> "请求格式不对（检查地址是不是 https://账号ID.r2.cloudflarestorage.com/桶名）"
-        401, 403 -> "R2 拒绝了：密钥不对、没有这个桶的读写权限，或手机时间和标准时间差了 15 分钟以上（签名会失效）"
-        404 -> "桶或文件不存在（检查地址最后的桶名对不对）"
-        429 -> "请求太频繁，被 R2 限速了，请稍后再试"
-        in 500..599 -> "R2 服务器出错"
-        else -> "R2 返回了意外的状态"
     }
 
     /** 出错响应里的正文（坚果云会在里面写具体原因，比如 BlockedTemporarily），最多取 2000 字符 */
@@ -141,7 +131,6 @@ object WebDav {
 
     /** 确保 根文件夹/sub 存在（同一次运行里只建一次） */
     fun ensureDir(c: DavConfig, sub: String = "") {
-        if (c.s3) return   // R2 没有文件夹，对象名带前缀即可
         val key = root(c) + "|" + sub + "|" + c.user
         if (!ensured.add(key)) return
         try {
@@ -160,17 +149,11 @@ object WebDav {
             override fun contentLength() = length
             override fun writeTo(sink: BufferedSink) { writer(sink.outputStream()) }
         }
-        val req = if (c.s3) S3.request(c, "PUT", S3.objUrl(c, sub), body, tag)
-            else builder(c, url(c, sub)).put(body).tag(tag).build()
-        call(req, "上传").close()
+        call(builder(c, url(c, sub)).put(body).tag(tag).build(), "上传").close()
     }
 
-    private fun getReq(c: DavConfig, sub: String, tag: Any?): Request =
-        if (c.s3) S3.request(c, "GET", S3.objUrl(c, sub), null, tag)
-        else builder(c, url(c, sub)).get().tag(tag).build()
-
     fun <T> get(c: DavConfig, sub: String, tag: Any? = null, block: (InputStream) -> T): T {
-        return call(getReq(c, sub, tag), "下载").use { block(it.body!!.byteStream()) }
+        return call(builder(c, url(c, sub)).get().tag(tag).build(), "下载").use { block(it.body!!.byteStream()) }
     }
 
     /** 中断所有带这个标记的网盘请求（取消传输时用）：正在上传 / 下载的会马上抛出 IOException */
@@ -181,16 +164,14 @@ object WebDav {
 
     /** 下载一个不大的文件到内存；超过 max 字节就报错（免得对方 / 服务器塞个超大文件把内存撑爆） */
     fun getBytes(c: DavConfig, sub: String, max: Long, tag: Any? = null): ByteArray =
-        call(getReq(c, sub, tag), "下载").use { r ->
+        call(builder(c, url(c, sub)).get().tag(tag).build(), "下载").use { r ->
             val src = r.body!!.source()
             if (src.request(max + 1)) throw IOException("下载的文件比预期的大")
             src.readByteArray()
         }
 
     fun delete(c: DavConfig, sub: String) {
-        val req = if (c.s3) S3.request(c, "DELETE", S3.objUrl(c, sub), null, null)
-            else builder(c, url(c, sub)).delete().build()
-        call(req, "删除").close()
+        call(builder(c, url(c, sub)).delete().build(), "删除").close()
     }
 
     /** 文件夹里的一个文件：名字、大小（字节）、最后修改时间（毫秒时间戳，服务器没给或解析不了是 0） */
@@ -198,7 +179,6 @@ object WebDav {
 
     /** 列出 sub 文件夹里的所有文件（不含子文件夹）；文件夹不存在返回空。清理残留用 */
     fun listEntries(c: DavConfig, sub: String): List<Entry> {
-        if (c.s3) return listS3(c, sub)
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
         checkNotBlocked("查看文件夹")
@@ -224,24 +204,8 @@ object WebDav {
         }
     }
 
-    /** R2：ListObjectsV2，按前缀 + 分隔符 / 只列这一层，翻页取完 */
-    private fun listS3(c: DavConfig, sub: String): List<Entry> {
-        val prefix = S3.prefixOf(c, sub)
-        val all = ArrayList<Entry>()
-        var token: String? = null
-        var pages = 0
-        do {
-            val req = S3.request(c, "GET", S3.listUrl(c, prefix, token), null, null)
-            val page = call(req, "查看文件夹").use { S3.parseList(it.body!!.string()) }
-            all.addAll(page.entries)
-            token = page.next
-        } while (token != null && ++pages < 100)
-        return all
-    }
-
     /** 列出 sub 文件夹里的 .bin 文件名；文件夹不存在返回空 */
     fun listBins(c: DavConfig, sub: String): List<String> {
-        if (c.s3) return listS3(c, sub).map { it.name }.filter { it.endsWith(".bin") }
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
         checkNotBlocked("查看文件夹")
@@ -288,13 +252,6 @@ object DavProviders {
             "InfiniCLOUD WebDAV 地址（在 My Page → Apps Connection 里看，每个账号不一样）",
             "InfiniCLOUD 用户名（User ID）", "Apps Connection 里生成的密码",
             "免费 20GB，官网称没有传输限制；服务器在日本，先确认你的网络能打开自己的 teracloud.jp 地址。"
-        ),
-        DavProvider(
-            "r2", "Cloudflare R2", "", "https://<账号ID>.r2.cloudflarestorage.com/<桶名>",
-            "R2 地址（S3 接口地址 + /桶名，账号ID 在 R2 概览页右侧）",
-            "Access Key ID（用 API Token 时填 Token 的 ID）",
-            "Secret Access Key（用 API Token 时直接填 Token 的值，App 会按官方规则自动取 SHA-256）",
-            "走 S3 接口，不是 WebDAV。免费 10GB，出站流量免费，没有坚果云那种请求次数 / 月流量限制，所以不显示额度保护。桶要先在 Cloudflare 里建好；手机时间要准（差 15 分钟以上签名会失效）。"
         ),
         DavProvider(
             "custom", "自定义", "", "https://example.com/dav/",
