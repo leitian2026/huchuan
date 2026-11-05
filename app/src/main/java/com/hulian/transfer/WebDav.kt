@@ -43,8 +43,59 @@ object Http {
 
 /** 最小的 WebDAV 客户端（坚果云 / InfiniCLOUD / 其他支持 WebDAV 的网盘通用）：建文件夹、上传、下载、删除、列目录 */
 object WebDav {
-    /** blocked：服务器说“请求太频繁，被临时封了”（BlockedTemporarily）：这时重试只会封得更久，不能重试 */
-    class DavException(val code: Int, msg: String, val blocked: Boolean = false) : IOException(msg)
+    /**
+     * blocked：服务器说“请求太频繁，被临时封了”（BlockedTemporarily）：这时重试只会封得更久，不能重试。
+     * waitMs：被限速（429）时建议等多久再发请求（毫秒），0 表示没有。
+     * queued：true 表示这个请求根本没发出去（正在退避中，本软件自己拦下了），重试时不算一次失败
+     */
+    class DavException(
+        val code: Int, msg: String, val blocked: Boolean = false,
+        val waitMs: Long = 0L, val queued: Boolean = false
+    ) : IOException(msg)
+
+    // ---------- 429 通用退避（所有网盘都用，不依赖坚果云的额度统计） ----------
+    // 任何网盘回 429（请求太多）：先停一段时间不发请求，免得一边被限速一边继续猛发、被限得更久。
+    // 服务器给了 Retry-After 就照它等，没给就 30 秒起步、连续碰到就翻倍，最多 10 分钟；成功一次后清零。
+
+    private const val BACKOFF_BASE_MS = 30_000L
+    private const val BACKOFF_MIN_MS = 5_000L
+    private const val BACKOFF_MAX_MS = 10L * 60_000L
+    private val backoffLock = Any()
+    private var backoffUntil = 0L
+    private var backoffStreak = 0
+
+    /** 还要退避多久（毫秒），不在退避期返回 0 */
+    fun backoffLeftMs(): Long = synchronized(backoffLock) { (backoffUntil - System.currentTimeMillis()).coerceAtLeast(0L) }
+
+    /** Retry-After：秒数或日期，换算成毫秒；没有或看不懂返回 null */
+    private fun retryAfterMs(h: okhttp3.Headers?, now: Long): Long? {
+        val v = h?.get("Retry-After")?.trim() ?: return null
+        v.toLongOrNull()?.let { return it.coerceAtLeast(0L) * 1000L }
+        return h.getDate("Retry-After")?.time?.minus(now)
+    }
+
+    /** 碰到一次 429：开始（或延长）退避，返回现在还要等多少毫秒 */
+    private fun noteRateLimited(h: okhttp3.Headers?): Long {
+        val now = System.currentTimeMillis()
+        val ra = retryAfterMs(h, now)?.coerceIn(BACKOFF_MIN_MS, BACKOFF_MAX_MS)
+        return synchronized(backoffLock) {
+            if (now < backoffUntil) {
+                // 已经在退避期：同时在飞的别的请求也吃到了 429，不算新的一次，也不翻倍；只有服务器给了更长的等待才延长
+                if (ra != null) backoffUntil = maxOf(backoffUntil, now + ra)
+            } else {
+                backoffStreak = (backoffStreak + 1).coerceAtMost(5)
+                backoffUntil = now + (ra ?: (BACKOFF_BASE_MS shl (backoffStreak - 1)).coerceAtMost(BACKOFF_MAX_MS))
+            }
+            backoffUntil - now
+        }
+    }
+
+    /** 成功了一次：连续 429 的计数清零（还在退避期内的不清，那是退避之前就发出去的请求） */
+    private fun noteRequestOk() {
+        synchronized(backoffLock) {
+            if (backoffStreak != 0 && System.currentTimeMillis() >= backoffUntil) backoffStreak = 0
+        }
+    }
 
     private val ensured = ConcurrentHashMap.newKeySet<String>()
     private val xml = "application/xml".toMediaType()
@@ -95,13 +146,16 @@ object WebDav {
         ""
     }
 
-    private fun fail(op: String, code: Int, body: String = ""): Nothing {
+    private fun fail(op: String, code: Int, body: String = "", headers: okhttp3.Headers? = null): Nothing {
         val blocked = body.contains("BlockedTemporarily", ignoreCase = true)
         if (blocked) DavQuota.noteBlocked()
+        val wait = if (code == 429 && !blocked) noteRateLimited(headers) else 0L
         val detail = Regex("<(?:\\w+:)?message>([^<]*)<", RegexOption.IGNORE_CASE).find(body)?.groupValues?.get(1)?.trim().orEmpty()
-        val text = if (blocked) "请求太频繁，被坚果云临时封了（一般持续几小时），本软件会先暂停发请求" else why(code)
+        val text = if (blocked) "请求太频繁，被坚果云临时封了（一般持续几小时），本软件会先暂停发请求"
+            else if (wait > 0L) "请求太频繁，被${Store.davName}限速了，本软件会先暂停发请求约 ${(wait + 999L) / 1000L} 秒再试"
+            else why(code)
         val more = if (detail.isNotEmpty() && !blocked) "，服务器说：$detail" else ""
-        throw DavException(code, "${Store.davName}${op}失败：$text（HTTP $code$more）", blocked)
+        throw DavException(code, "${Store.davName}${op}失败：$text（HTTP $code$more）", blocked, wait)
     }
 
     /** 正在被坚果云限流封着：不再发请求（每多发一个请求都可能让封锁多持续一会儿） */
@@ -114,6 +168,15 @@ object WebDav {
                 true
             )
         }
+        // 刚被限速（429）：这段时间不发请求，请求没发出去，调用方等一会儿再来（不算失败）
+        val wait = backoffLeftMs()
+        if (wait > 0L) {
+            throw DavException(
+                429,
+                "${Store.davName}${op}暂缓：刚被限速（HTTP 429），约 ${(wait + 999L) / 1000L} 秒后再试",
+                false, wait, queued = true
+            )
+        }
     }
 
     private fun call(req: Request, op: String): Response {
@@ -123,9 +186,11 @@ object WebDav {
         if (!r.isSuccessful) {
             val code = r.code
             val body = bodyOf(r)
+            val hdr = r.headers
             r.close()
-            fail(op, code, body)
+            fail(op, code, body, hdr)
         }
+        noteRequestOk()
         return r
     }
 
@@ -135,7 +200,7 @@ object WebDav {
         val r = Http.dav.newCall(builder(c, url(c, sub)).method("MKCOL", null).build()).execute()
         r.use {
             // 201 新建；405 已经存在；有的服务器对已存在的文件夹回 301/302
-            if (it.code !in setOf(200, 201, 204, 301, 302, 405)) fail("创建文件夹", it.code, bodyOf(it))
+            if (it.code !in setOf(200, 201, 204, 301, 302, 405)) fail("创建文件夹", it.code, bodyOf(it), it.headers)
         }
     }
 
@@ -205,7 +270,7 @@ object WebDav {
         DavQuota.noteRequest()
         return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<Entry>()
-            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r))
+            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r), r.headers)
             val text = r.body!!.string()
             val href = Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE)
             val len = Regex("<(?:\\w+:)?getcontentlength>\\s*(\\d+)\\s*<", RegexOption.IGNORE_CASE)
@@ -248,7 +313,7 @@ object WebDav {
         DavQuota.noteRequest()
         return Http.dav.newCall(req).execute().use { r ->
             if (r.code == 404) return@use emptyList<String>()
-            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r))
+            if (!r.isSuccessful) fail("查看文件夹", r.code, bodyOf(r), r.headers)
             val text = r.body!!.string()
             Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE).findAll(text)
                 .map { URLDecoder.decode(it.groupValues[1].trimEnd('/'), "UTF-8").substringAfterLast('/') }
@@ -299,7 +364,8 @@ object DavProviders {
         DavProvider(
             "custom", "自定义", "", "https://example.com/dav/",
             "WebDAV 地址", "账号", "密码 / 应用密码",
-            "任何支持 WebDAV 的网盘或自己搭的服务（要 https）。"
+            "任何支持 WebDAV 的网盘或自己搭的服务（要 https）。注意：有些服务有请求频率限制但没公开具体数字（比如 Koofr 的 WebDAV 会回 429“请求太多”）。" +
+                "碰到 429 时本软件会自动暂停发请求一会儿再试，但这类网盘没有额度显示、也不会提前暂停；经常遇到的话，请把并行数调低（1～2）。"
         )
     )
 
