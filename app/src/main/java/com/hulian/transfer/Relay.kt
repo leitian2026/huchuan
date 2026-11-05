@@ -410,6 +410,11 @@ object Relay {
                         break
                     } catch (e: WebDav.DavException) {
                         ctl?.check()
+                        // 正在 429 退避中，请求没发出去：等到退避结束再来，不算一次失败
+                        if (e.queued) {
+                            delay(e.waitMs.coerceAtLeast(1000L))
+                            continue
+                        }
                         // 网盘上的文件夹被删了：缓存作废，重建后重试一次
                         if (attempt++ == 0 && (e.code == 404 || e.code == 409)) {
                             WebDav.forgetDirs()
@@ -417,7 +422,7 @@ object Relay {
                         }
                         // 服务器一时忙（429 / 5xx）：等几秒再试，最多 2 次；被限流封了（BlockedTemporarily）重试只会封得更久，不试
                         if (!e.blocked && (e.code == 429 || e.code in 500..599) && busy++ < 2) {
-                            delay(2000L * busy)
+                            delay(maxOf(2000L * busy, e.waitMs))   // 429 时按服务器要求 / 退避时间等
                             continue
                         }
                         throw e
@@ -589,6 +594,11 @@ object Relay {
             } catch (e: WebDav.DavException) {
                 ctl?.check()   // 取消造成的失败不要重试
                 synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }   // 这一段要重传，进度退回去
+                // 正在 429 退避中，请求没发出去：等到退避结束再来，不算一次失败
+                if (e.queued) {
+                    delay(e.waitMs.coerceAtLeast(1000L))
+                    continue
+                }
                 val folderGone = e.code == 404 || e.code == 409
                 val busy = !e.blocked && (e.code == 429 || e.code in 500..599)
                 if (attempt++ < 2 && (folderGone || busy)) {
@@ -596,7 +606,7 @@ object Relay {
                         WebDav.forgetDirs()
                         WebDav.ensureDir(c, peer.id)
                     } else {
-                        delay(2000L * attempt)
+                        delay(maxOf(2000L * attempt, e.waitMs))   // 429 时按服务器要求 / 退避时间等
                     }
                     continue
                 }
