@@ -77,6 +77,8 @@ object Relay {
         val tick = MutableStateFlow(0)
         val announced = ConcurrentHashMap.newKeySet<Int>()
         @Volatile var aborted = false
+        /** 消息头已经读完整、解开了（之后就有副作用：聊天里加了消息 / 开始写文件，下载断了不能简单地整个重来） */
+        @Volatile var gotHeader = false
         /** 对方的通知可能丢了（本机刚上线 / 重连过）：不等通知，直接去网盘看有没有 */
         @Volatile var optimistic = false
         /** 发送方点了暂停：它没有新分段是正常的，不算超时 */
@@ -725,18 +727,38 @@ object Relay {
                 return@withContext
             }
             val path = "${Store.deviceId}/$mid.bin"
-            try {
-                WebDav.get(c, path) { ins ->
-                    val cin = CountingInputStream(ins)
-                    multi = handleStream(mid, peers, cin, lv)
-                    DavQuota.addDown(cin.count)
+            // 下载中途被断开（常见：对方刚传完，网盘还没写好）：消息头还没读完整时没有任何副作用，等几秒从头再下一次，最多 2 次；
+            // 退避中（刚被 429 限速、请求没发出去）也是等一等再来
+            var cuts = 0
+            var waits = 0
+            while (true) {
+                try {
+                    try {
+                        WebDav.get(c, path) { ins ->
+                            val cin = CountingInputStream(ins)
+                            multi = handleStream(mid, peers, cin, lv)
+                            DavQuota.addDown(cin.count)
+                        }
+                    } catch (e: WebDav.DavException) {
+                        if (e.code == 404) {
+                            markDone(mid) // 已经收过并删除了
+                            return@withContext
+                        }
+                        if (e.queued && waits++ < 10) {
+                            delay(e.waitMs.coerceAtLeast(1000L))
+                            continue
+                        }
+                        throw e
+                    }
+                    break
+                } catch (e: WebDav.StreamCutException) {
+                    if (lv.gotHeader || cuts >= 2) {
+                        throw if (cuts > 0) WebDav.StreamCutException("${e.message}（已自动重试 $cuts 次，仍然失败）", e) else e
+                    }
+                    cuts++
+                    Hub.log("远程中转：下载被中途断开，第 $cuts 次重试（$mid）", e)
+                    delay(3000L * cuts)
                 }
-            } catch (e: WebDav.DavException) {
-                if (e.code == 404) {
-                    markDone(mid) // 已经收过并删除了
-                    return@withContext
-                }
-                throw e
             }
             // 分段文件：第 0 段（上面）收完后，继续收后面的分段
             multi?.let { finishMulti(c, it, lv) }
@@ -811,6 +833,7 @@ object Relay {
         val keys = peers.map { RelayCrypto.key(it.rk) }
         val (idx, metaBytes) = reader.open(keys)
             ?: throw NoKeyException("无法解密：密钥对不上（对方用的不是和本机交换过的密钥，或者这不是发给本机的内容）")
+        lv.gotHeader = true   // 到这里才有副作用：之前断了可以整个重来
         val peer = peers[idx]
         lv.peerId = peer.id
         val meta = JSONObject(String(metaBytes, Charsets.UTF_8))
