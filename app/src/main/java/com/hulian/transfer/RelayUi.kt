@@ -17,6 +17,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -194,21 +195,24 @@ private fun RelaySettingsCardBody() {
                 "内容在手机上加密，网盘和 Cloudflare 都看不到。两台手机要填同一份配置，能直连时仍然优先直连。",
             trailing = { Switch(checked = on, onCheckedChange = { on = it; save() }) }
         )
-        Text("状态：$state", fontSize = 13.sp, color = if (state.startsWith("已连接")) Color(0xFF2E9E5B) else Gray)
+        StatusLine("状态：$state", state.startsWith("已连接"))
+
+        SubTitle("Cloudflare")
         Field("Cloudflare 地址（域名或 xxx.workers.dev）", url) { url = it }
         Field("中转口令（RELAY_SECRET）", secret, secretField = true) { secret = it }
 
-        SwitchRow("Cloudflare 使用系统 DNS", cfSys, "关闭后只认 Host 映射，没有映射的域名直接连不上，不会用系统 DNS") { cfSys = it }
-
+        SubTitle("高级设置")
         FoldSection("域名解析", dnsSummary) {
-            Text(
+            NoteText(
                 "Host 映射：给域名指定 IP，填了的域名直接连这个 IP，不查 DNS，连不上自动换下一个。Cloudflare 和网盘共用这一份；" +
-                    "没有映射的域名：Cloudflare 看“使用系统 DNS”开关；网盘先试自建 DoH（在“网盘”里设置），再看开关。开关关着就连不上。",
-                fontSize = 12.sp, color = Gray
+                    "没有映射的域名：Cloudflare 看“使用系统 DNS”开关；网盘先试自建 DoH（在“网盘”里设置），再看开关。开关关着就连不上。"
             )
+            SubTitle("Host 映射")
             SwitchRow("使用 Host 映射", hostsOn, "关闭时下面填的内容保留但不使用，所有域名都不再用写死的 IP") { hostsOn = it }
             if (hostsOn) Field("Host 映射（每行：域名 IP [IP…]）", hosts, lines = 3) { hosts = it }
             hostsErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE5484D)) }
+            SubTitle("没有映射的域名")
+            SwitchRow("Cloudflare 使用系统 DNS", cfSys, "关闭后只认 Host 映射，没有映射的域名直接连不上，不会用系统 DNS") { cfSys = it }
         }
 
         FoldSection("网盘", cur.name + " · " + davDir + (if (davDnsSummary.isEmpty()) "" else " · $davDnsSummary"), startOpen = davUser.isBlank() || davPass.isBlank()) {
@@ -218,21 +222,18 @@ private fun RelaySettingsCardBody() {
                     FilterChip(selected = prov == p.id, onClick = { switchProv(p.id) }, label = { Text(p.name) })
                 }
             }
-            Text(cur.note + "两台手机要选同一家、填同一个账号。", fontSize = 12.sp, color = Gray)
+            NoteText(cur.note + "两台手机要选同一家、填同一个账号。")
+            SubTitle("账号")
             Field(cur.urlLabel, davUrl) { davUrl = it }
             Field(cur.userLabel, davUser) { davUser = it }
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
+            SubTitle("传输速度")
             Field("并行数（大文件同时传 / 收几段，1～8，默认 3）", parText) { parText = it.filter { c -> c.isDigit() }.take(1) }
-            Text(
-                "并行数越大越能叠加速度，但请求次数也烧得更快；坚果云没有公开并发上限，超出请求次数会被临时封号数小时。建议 3～4。",
-                fontSize = 12.sp, color = Gray
-            )
+            NoteText("并行数越大越能叠加速度，但请求次数也烧得更快；坚果云没有公开并发上限，超出请求次数会被临时封号数小时。建议 3～4。")
 
-            Text(
-                "自建 DoH（可选，默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。",
-                fontSize = 12.sp, color = Gray
-            )
+            SubTitle("域名解析（可选）")
+            NoteText("自建 DoH（默认关）：只用来解析没有映射的网盘域名。只防 DNS 被改，握手时的域名（SNI）仍是明文。")
             SwitchRow("使用自建 DoH", dohOn, "关闭时没有映射的网盘域名交给下面的系统 DNS；填的 DoH 地址会保留") { dohOn = it }
             if (dohOn) Field("自建 DoH（https://…，一行一个）", doh, lines = 2) { doh = it }
             SwitchRow("网盘使用系统 DNS", davSys, "开着：没有映射、DoH 没开或没解析出来时用系统 DNS。关闭后只认 Host 映射和 DoH，都不行就连不上，不会用系统 DNS") { davSys = it }
@@ -246,17 +247,14 @@ private fun RelaySettingsCardBody() {
                 "额度保护（坚果云）",
                 if (!quotaOn) "已关" else if (q == null) "开" else "上传剩 ${fmtSize((q.upLimit - q.upUsed).coerceAtLeast(0L))} · 下载剩 ${fmtSize((q.downLimit - q.downUsed).coerceAtLeast(0L))}"
             ) {
-                Text(
+                NoteText(
                     "额度是整个账号共用的：本机数自己的用量，对方的用量由对方在通知里带过来，加起来才是总用量。" +
-                        "网页端上传、别的 WebDAV 软件用掉的，本机数不到，可以在下面“校准”。每月 1 日按本机时间清零。",
-                    fontSize = 12.sp, color = Gray
+                        "网页端上传、别的 WebDAV 软件用掉的，本机数不到，可以在下面“校准”。每月 1 日按本机时间清零。"
                 )
+                SubTitle("额度设置")
                 SwitchRow("快到上限自动暂停", quotaOn, "请求次数用到上限的 90%、或剩下的月流量不够传下一段时，自动暂停并在聊天里写明原因") { quotaOn = it }
                 Field("流量刷新日（每月几号，1～31；两台手机要填一样的）", qDay) { qDay = it.filter { c -> c.isDigit() }.take(2) }
-                Text(
-                    "当前周期从 ${DavQuota.cycleStart()} 开始，到下一个刷新日自动清零。改刷新日不会清掉已有的用量。",
-                    fontSize = 12.sp, color = Gray
-                )
+                NoteText("当前周期从 ${DavQuota.cycleStart()} 开始，到下一个刷新日自动清零。改刷新日不会清掉已有的用量。")
                 Row(horizontalArrangement = BtnRowGap) {
                     ActionBtn("马上重置本月用量") {
                         DavQuota.resetNow()
@@ -283,12 +281,12 @@ private fun RelaySettingsCardBody() {
                         busy = false
                     }
                 }
-                Text(
-                    "同步真实用量：点“登录坚果云”，在弹出的坚果云官方登录页里登录（验证码、短信验证都在官方页面里完成，密码不经过本 App 的输入框），" +
+                SubTitleWithHelp(
+                    "同步真实用量",
+                    "点“登录坚果云”，在弹出的坚果云官方登录页里登录（验证码、短信验证都在官方页面里完成，密码不经过本 App 的输入框），" +
                         "登录成功后登录凭证（Cookie）自动取回、加密保存在本机，并马上同步一次；取完会清掉内置网页里的登录状态。" +
                         "凭证过期了再点一次。也可以手动粘贴：电脑浏览器登录坚果云，按 F12 → 网络 → 点开一条 jianguoyun.com 的请求 → 复制“请求标头”里 Cookie 那一整串。" +
-                        "凭证不会被“复制配置”带走，只在点按钮时请求一次。同步后额度、本周期已用、刷新日都按坚果云的真实数据改好。两台手机各自点一次。",
-                    fontSize = 12.sp, color = Gray
+                        "凭证不会被“复制配置”带走，只在点按钮时请求一次。同步后额度、本周期已用、刷新日都按坚果云的真实数据改好。两台手机各自点一次。"
                 )
                 Field("坚果云网页 Cookie（登录后自动填入，也可手动粘贴）", jgyCookie, secretField = true) { jgyCookie = it }
                 Row(horizontalArrangement = BtnRowGap) {
@@ -304,7 +302,8 @@ private fun RelaySettingsCardBody() {
                         }
                     }
                 }
-                Text("校准：也可以手动填坚果云 App 里看到的本月已用流量（MB），留空的不改", fontSize = 12.sp, color = Gray)
+                SubTitle("手动校准")
+                NoteText("也可以手动填坚果云 App 里看到的本月已用流量（MB），留空的不改")
                 Field("本月已用上传（MB）", calUp) { calUp = it.filter { c -> c.isDigit() }.take(7) }
                 Field("本月已用下载（MB）", calDown) { calDown = it.filter { c -> c.isDigit() }.take(7) }
                 Row(horizontalArrangement = BtnRowGap) {
@@ -317,7 +316,8 @@ private fun RelaySettingsCardBody() {
             }
         }
 
-        HorizontalDivider(color = Color(0xFFEDEFF3))
+        HorizontalDivider(color = LineColor, modifier = Modifier.padding(top = 4.dp))
+        SubTitle("配置")
         Row(horizontalArrangement = BtnRowGap) {
             ActionBtn("保存", filled = true) {
                 val err = settingsError()
@@ -329,6 +329,7 @@ private fun RelaySettingsCardBody() {
             }
             ActionBtn("粘贴配置") { importCfg() }
         }
+        SubTitle("检测与维护")
         Row(horizontalArrangement = BtnRowGap) {
             ActionBtn("测试中转", enabled = !busy) { test("测试 Cloudflare 失败", "Cloudflare 可用，口令正确") { Relay.testWorker() } }
             ActionBtn("测试网盘", enabled = !busy) {
@@ -368,8 +369,10 @@ private fun RelaySettingsCardBody() {
                     busy = false
                 }
             }
+            EmptySlot()
+            EmptySlot()
         }
-        if (dnsInfo.isNotEmpty()) Text(dnsInfo, fontSize = 12.sp, color = Gray)
+        if (dnsInfo.isNotEmpty()) InfoBox(dnsInfo)
     }
 }
 
@@ -378,6 +381,7 @@ private fun Field(label: String, value: String, secretField: Boolean = false, li
     OutlinedTextField(
         value = value, onValueChange = onChange, label = { Text(label) }, singleLine = lines == 1, minLines = lines,
         visualTransformation = if (secretField) PasswordVisualTransformation() else VisualTransformation.None,
+        colors = OutlinedTextFieldDefaults.colors(focusedContainerColor = Color.White, unfocusedContainerColor = Color.White),
         modifier = Modifier.fillMaxWidth()
     )
 }
