@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,6 +40,7 @@ fun TransportSettingsCard() {
             Hub.discovery?.restart()
             Hub.probeKnown()
         }
+        HorizontalDivider(color = LineColor)
         SwitchRow("热点", hs, "没有共同 Wi-Fi 时用 Wi-Fi Direct / 临时热点") {
             hs = it
             Store.hotspotOn = it
