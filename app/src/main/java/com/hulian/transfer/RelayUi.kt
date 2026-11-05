@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.util.Base64
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -38,6 +40,7 @@ fun RelaySettingsCard() {
     key(rev) { RelaySettingsCardBody() }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RelaySettingsCardBody() {
     val ctx = LocalContext.current
@@ -209,7 +212,8 @@ private fun RelaySettingsCardBody() {
         }
 
         FoldSection("网盘", cur.name + " · " + davDir + (if (davDnsSummary.isEmpty()) "" else " · $davDnsSummary"), startOpen = davUser.isBlank() || davPass.isBlank()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 手机屏幕窄，三个选项一行放不下会把最后一个（自定义）挤出屏幕又划不动：放不下就换行
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 DavProviders.all.forEach { p ->
                     FilterChip(selected = prov == p.id, onClick = { switchProv(p.id) }, label = { Text(p.name) })
                 }
