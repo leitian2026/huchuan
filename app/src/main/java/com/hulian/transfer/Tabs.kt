@@ -342,7 +342,7 @@ fun DevicesTab(onChat: (String) -> Unit, onConnect: () -> Unit) {
 fun MeTab() {
     Column(
         Modifier.fillMaxSize().background(ChatBg).verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) { SettingsContent() }
 }
 
@@ -379,30 +379,42 @@ fun SettingsContent() {
         } catch (e: Exception) { Hub.log("读取版本号", e); "（读取失败）" }
     }
 
-    Text("当前版本：$ver", fontSize = 12.sp, color = Gray)
-    OutlinedTextField(
-        value = name, onValueChange = { name = it; if (it.isNotBlank()) Store.deviceName = it.trim() },
-        label = { Text("本机名称（对方看到的名字）") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+    SettingsGroup("基本") {
+        SettingsCard {
+            CardTitle("本机名称", help = "对方设备上看到的就是这个名字。改完离开设置页后生效。")
+            OutlinedTextField(
+                value = name, onValueChange = { name = it; if (it.isNotBlank()) Store.deviceName = it.trim() },
+                label = { Text("对方看到的名字") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+        }
+        SettingsCard {
+            CardTitle(
+                "接收文件保存位置",
+                help = "选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。"
+            )
+            Text(dirLabel, fontSize = 14.sp)
+            Row(horizontalArrangement = BtnRowGap) {
+                ActionBtn("选择文件夹", filled = true) { treePicker.launch(null) }
+                if (dir != null) ActionBtn("恢复默认") { Store.saveDir = null; dir = null } else EmptySlot()
+            }
+        }
+    }
+    SettingsGroup("传输") {
+        TransportSettingsCard()
+        RelaySettingsCard()
+    }
+    SettingsGroup("其他") {
+        SettingsCard {
+            CardTitle("错误记录", help = "程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。")
+            Row(horizontalArrangement = BtnRowGap) {
+                ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }
+                ActionBtn("清空") { Hub.clearErrorLog(); Hub.toast("已清空") }
+                EmptySlot()
+            }
+        }
+    }
+    Text(
+        "当前版本 $ver", fontSize = 12.sp, color = Gray, textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
     )
-    SettingsCard {
-        CardTitle(
-            "接收文件保存位置",
-            help = "选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。"
-        )
-        Text(dirLabel, fontSize = 14.sp)
-        Row(horizontalArrangement = BtnRowGap) {
-            ActionBtn("选择文件夹", filled = true) { treePicker.launch(null) }
-            if (dir != null) ActionBtn("恢复默认") { Store.saveDir = null; dir = null } else EmptySlot()
-        }
-    }
-    TransportSettingsCard()
-    RelaySettingsCard()
-    SettingsCard {
-        CardTitle("错误记录", help = "程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。")
-        Row(horizontalArrangement = BtnRowGap) {
-            ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }
-            ActionBtn("清空") { Hub.clearErrorLog(); Hub.toast("已清空") }
-            EmptySlot()
-        }
-    }
 }
