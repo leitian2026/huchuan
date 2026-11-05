@@ -1,7 +1,13 @@
 package com.hulian.transfer
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,6 +16,9 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -25,29 +34,59 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/* 设置页的公共小部件：统一卡片、可折叠的说明、可折叠的分组、等宽按钮、开关行。
+/* 设置页的公共小部件。层次从大到小：
+   SettingsGroup（页面分区标题）→ SettingsCard（白色卡片）→ FoldSection（卡片里的折叠面板，有边框和底色）
+   → SubTitle（面板 / 卡片里的小标题）→ 字段、开关、按钮、灰色说明。
    设置页每张卡片都用这几个，间距、字号、按钮宽度才能一致。 */
 
-/** 设置页统一的卡片：白底，内边距和行距统一，比之前紧凑 */
+/** 边框线颜色 */
+val LineColor = Color(0xFFE1E6EF)
+/** 折叠面板展开后的底色（比白色卡片略深，一眼能看出“折叠出来的内容”在哪） */
+val PanelBg = Color(0xFFF4F7FC)
+/** 说明框底色 */
+val InfoBg = Color(0xFFEAF1FC)
+
+/** 页面分区：一个带蓝色竖条的小标题 + 下面若干张卡片。让整页分成“基本 / 传输 / 其他”几块 */
 @Composable
-fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
+fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.padding(start = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(width = 4.dp, height = 14.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.primary))
+            Text(
+                title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+        content()
     }
 }
 
-/** 卡片标题。help 不为空时标题旁边有“说明”，点一下展开 / 收起灰色的解释文字；trailing 放右侧（比如开关） */
+/** 设置页统一的卡片：白底、细边框，内边距和行距统一 */
+@Composable
+fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, LineColor),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+    }
+}
+
+/** 卡片标题。help 不为空时标题旁边有“说明”，点一下在下面展开一个蓝灰色的说明框；trailing 放右侧（比如开关） */
 @Composable
 fun CardTitle(title: String, help: String? = null, trailing: (@Composable () -> Unit)? = null) {
     var open by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         if (help != null) {
             Text(
                 if (open) "收起说明" else "说明",
@@ -58,37 +97,100 @@ fun CardTitle(title: String, help: String? = null, trailing: (@Composable () -> 
         Spacer(Modifier.weight(1f))
         trailing?.invoke()
     }
-    if (help != null && open) Text(help, fontSize = 12.sp, color = Gray, lineHeight = 17.sp)
+    if (help != null && open) InfoBox(help)
 }
 
-/** 可折叠的分组：一行标题 + 摘要 + ▾，点一下展开里面的内容。startOpen 只在第一次显示时生效 */
+/** 说明框：浅蓝底圆角块，和普通的灰色小字区分开 */
+@Composable
+fun InfoBox(text: String) {
+    Text(
+        text, fontSize = 12.sp, color = Color(0xFF4A5568), lineHeight = 18.sp,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(InfoBg).padding(10.dp)
+    )
+}
+
+/** 普通的灰色小字注解 */
+@Composable
+fun NoteText(text: String) {
+    Text(text, fontSize = 12.sp, color = Gray, lineHeight = 17.sp)
+}
+
+/** 卡片 / 面板里的小标题：把一堆字段分成几组 */
+@Composable
+fun SubTitle(text: String) {
+    Text(text, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF3B4252), modifier = Modifier.padding(top = 4.dp))
+}
+
+/** 小标题 + 右边的“说明”开关：长篇说明默认收起，点开显示在说明框里 */
+@Composable
+fun SubTitleWithHelp(text: String, help: String) {
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(text, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF3B4252))
+        Text(
+            if (open) "收起说明" else "说明",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 6.dp).clickable { open = !open }.padding(horizontal = 4.dp, vertical = 4.dp)
+        )
+    }
+    if (open) InfoBox(help)
+}
+
+/**
+ * 可折叠的面板：自己有圆角边框。
+ * 收起时是白底一行（标题 + 摘要 + ▾）；展开后底色变深、边框变蓝，标题下面有分隔线，里面的内容整块缩进，
+ * 这样一眼就能看出折叠出来的内容从哪开始、到哪结束。startOpen 只在第一次显示时生效
+ */
 @Composable
 fun FoldSection(title: String, summary: String, startOpen: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
     var open by remember { mutableStateOf(startOpen) }
-    HorizontalDivider(color = Color(0xFFEDEFF3))
-    Row(
-        Modifier.fillMaxWidth().clickable { open = !open }.padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+    val shape = RoundedCornerShape(12.dp)
+    val arrow by animateFloatAsState(if (open) 180f else 0f, label = "fold-arrow")
+    val primary = MaterialTheme.colorScheme.primary
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(shape)
+            .background(if (open) PanelBg else Color.White)
+            .border(1.dp, if (open) primary.copy(alpha = 0.45f) else LineColor, shape)
+            .animateContentSize()
     ) {
-        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-        Text(
-            summary, fontSize = 12.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
-        )
-        Text(if (open) "▴" else "▾", fontSize = 14.sp, color = Gray)
+        Row(
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = if (open) primary else Color.Unspecified)
+                if (summary.isNotEmpty() && !open) {
+                    Text(summary, fontSize = 12.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Text("▾", fontSize = 16.sp, color = if (open) primary else Gray, modifier = Modifier.rotate(arrow).padding(start = 8.dp))
+        }
+        if (open) {
+            HorizontalDivider(color = primary.copy(alpha = 0.2f))
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+        }
     }
-    if (open) Column(verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
 }
 
 /** 一行开关：左边名字（可带一行小字），右边开关 */
 @Composable
 fun SwitchRow(label: String, checked: Boolean, sub: String? = null, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
             Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-            if (sub != null) Text(sub, fontSize = 12.sp, color = Gray)
+            if (sub != null) Text(sub, fontSize = 12.sp, color = Gray, lineHeight = 16.sp)
         }
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** 状态小圆点 + 文字（比如“已连接”） */
+@Composable
+fun StatusLine(text: String, ok: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(if (ok) Color(0xFF2E9E5B) else Gray))
+        Text(text, fontSize = 13.sp, color = if (ok) Color(0xFF2E9E5B) else Gray, modifier = Modifier.padding(start = 6.dp))
     }
 }
 
