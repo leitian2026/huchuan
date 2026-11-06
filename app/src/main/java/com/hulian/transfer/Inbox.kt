@@ -45,6 +45,24 @@ object Inbox {
         return FileJob(id, size, title, isApp, saved)
     }
 
+    /** 远程发来文件：先在聊天里放一张“待接收”的卡片，用户点“接收”才开始下载。卡片的 id 就是消息编号 */
+    fun offerFile(pid: String, mid: String, h: JSONObject) {
+        val size = h.getLong("size")
+        if (size < 0) throw IOException("文件大小无效")
+        val fname = Saver.sanitize(Space.safeName(h.getString("fname")))
+        val isApp = h.optString("kind") == "app"
+        val title = if (isApp) h.optString("app").ifEmpty { fname } else fname
+        Hub.removeMsg(mid)   // 同一条重复扫到：不留两张卡
+        Hub.addMsg(
+            Msg(
+                mid, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
+                name = title, file = fname, size = size, state = MsgState.OFFERED,
+                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
+            )
+        )
+        Notifier.message(pid, (if (isApp) "发来应用：" else "发来文件：") + title + "（点开选择是否接收）")
+    }
+
     fun progress(j: FileJob, got: Long) {
         Hub.patch(j.id) { it.copy(done = got) }
     }
