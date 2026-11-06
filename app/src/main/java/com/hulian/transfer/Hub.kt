@@ -79,8 +79,9 @@ object Hub {
     private val onceKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** 弹出错误窗口；已经有一个窗口开着时排队，一个个显示，不会互相覆盖。同时写入错误记录 */
-    fun fail(title: String, reason: String, detail: String = "") {
-        logLine("$title：$reason" + if (detail.isNotEmpty()) "  [" + detail.replace("\n", " | ") + "]" else "")
+    /** log=false：只弹窗显示、不写进错误记录（“查看错误记录”自己用，不然每看一次就把整份记录又记一遍） */
+    fun fail(title: String, reason: String, detail: String = "", log: Boolean = true) {
+        if (log) logLine("$title：$reason" + if (detail.isNotEmpty()) "  [" + detail.replace("\n", " | ") + "]" else "")
         synchronized(pendingErrors) {
             val cur = errorDialog.value
             if (cur == null) {
