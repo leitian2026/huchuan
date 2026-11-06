@@ -16,7 +16,8 @@ object Inbox {
      * 开始接收文件：检查大小和存储空间，建好聊天里的消息和目标文件。
      * 不能接收时抛 IOException，消息就是原因（直连时会原样回给发送方）
      */
-    fun beginFile(pid: String, h: JSONObject): FileJob {
+    /** reuse：聊天里已经有这条消息（点“接收”前的待接收卡片）就原位改成“接收中”，不删了重建，列表不会跳 */
+    fun beginFile(pid: String, h: JSONObject, reuse: String? = null): FileJob {
         val size = h.getLong("size")
         if (size < 0) throw IOException("文件大小无效")
         val free = Space.available()
@@ -26,15 +27,25 @@ object Inbox {
         }
         val fname = Saver.sanitize(Space.safeName(h.getString("fname")))
         val isApp = h.optString("kind") == "app"
-        val id = newId()
+        val inPlace = reuse != null && Hub.msgs.value.any { it.id == reuse }
+        val id = if (inPlace) reuse!! else newId()
         val title = if (isApp) h.optString("app").ifEmpty { fname } else fname
-        Hub.addMsg(
-            Msg(
-                id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
-                name = title, file = fname, size = size, state = MsgState.RECEIVING,
-                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
+        if (inPlace) {
+            Hub.patch(id) {
+                it.copy(
+                    name = title, file = fname, size = size, state = MsgState.RECEIVING, done = 0L, error = "",
+                    pkg = h.optString("pkg"), ver = h.optString("ver")
+                )
+            }
+        } else {
+            Hub.addMsg(
+                Msg(
+                    id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
+                    name = title, file = fname, size = size, state = MsgState.RECEIVING,
+                    pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
+                )
             )
-        )
+        }
         val saved: Saver.Out = try {
             Saver.create(Hub.app, fname)
         } catch (e: Exception) {
