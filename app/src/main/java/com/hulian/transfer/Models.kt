@@ -5,7 +5,7 @@ import java.util.UUID
 
 enum class Kind { TEXT, FILE, APP }
 /** OFFERED：远程发来的文件，等本机点“接收”才下载（不写入聊天记录文件，重启后由网盘扫描重新生成） */
-enum class MsgState { SENDING, RECEIVING, PAUSED, DONE, FAILED, CANCELED, OFFERED }
+enum class MsgState { SENDING, RECEIVING, PAUSED, DONE, FAILED, CANCELED, OFFERED, WAITING }
 
 data class Peer(
     val id: String,
