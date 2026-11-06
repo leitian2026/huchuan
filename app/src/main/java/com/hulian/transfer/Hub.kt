@@ -46,6 +46,8 @@ object Hub {
     @Volatile var discovery: Discovery? = null
     @Volatile var openPeer: String? = null      // 当前打开的聊天对象
     @Volatile var appVisible = false            // 应用界面当前是否在前台可见（退到桌面/锁屏后为 false）
+    /** 屏幕是否亮着（TransferService 监听亮屏 / 息屏）：息屏时后台巡检放稀、停掉局域网探测，省电 */
+    @Volatile var screenOn = true
     /** 本 app 自己拉起了系统选文件界面：app 会暂时退到后台，但这不算离开，连接要原样保留 */
     @Volatile var picking = false
     /** 界面被系统销毁重建（不是用户退出）：重建过程中界面销毁不能当成“离开对话框”去断开连接 */
@@ -355,6 +357,8 @@ object Hub {
     }
 
     fun markOnline(id: String) {
+        probeFails.remove(id)
+        probeNext.remove(id)
         _peers.update { map ->
             val p = map[id] ?: return@update map
             map + (id to p.copy(online = true, lastSeen = now()))
@@ -376,25 +380,57 @@ object Hub {
     }
 
     /** 逐个探测已记住但显示离线的设备：能连上就立刻标为在线 */
-    fun probeKnown() {
+    /** 每台离线设备探测失败几次了、下一次最早什么时候再探测（退避：不在同一网络的设备别每 15 秒唤醒一次 Wi-Fi） */
+    private val probeFails = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val probeNext = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun probeBackoffMs(fails: Int) = when {
+        fails <= 1 -> 15_000L
+        fails == 2 -> 60_000L
+        else -> 5 * 60_000L
+    }
+
+    /**
+     * 探测离线的已配对设备能不能直连。force=true（换网络、回到前台、亮屏、手动搜索）时忽略退避、马上探测；
+     * 后台定时调用时，连续失败的设备按 15 秒 → 1 分钟 → 5 分钟的间隔退避
+     */
+    fun probeKnown(force: Boolean = false) {
         // 同一 Wi-Fi 关着时，只有热点连接已经建立才探测（热点开关也关着就完全不探测）
         val hsLink = Store.hotspotOn && (HotspotJoin.active.value || DirectGroup.up.value || HotspotHost.isUp())
         if (!Store.lanOn && !hsLink) return
         scope.launch {
+            val t = now()
             _peers.value.values.filter { !it.online && it.paired && it.host.isNotEmpty() }.forEach { p ->
-                launch { if (Net.ping(p)) markOnline(p.id) }
+                if (!force && t < (probeNext[p.id] ?: 0L)) return@forEach
+                launch {
+                    if (Net.ping(p)) {
+                        probeFails.remove(p.id)
+                        probeNext.remove(p.id)
+                        markOnline(p.id)
+                    } else {
+                        val n = (probeFails[p.id] ?: 0) + 1
+                        probeFails[p.id] = n
+                        probeNext[p.id] = now() + probeBackoffMs(n)
+                    }
+                }
             }
         }
     }
 
+    /** 亮屏 / 息屏。亮屏时马上探测一次（用户可能刚回到有对方设备的网络） */
+    fun onScreen(on: Boolean) {
+        screenOn = on
+        discovery?.refreshLock()
+        if (on) probeKnown(force = true)
+    }
+
     fun rescan() {
         discovery?.restart()
-        probeKnown()
+        probeKnown(force = true)
     }
 
     fun onNetworkChanged() {
         discovery?.restart()
-        probeKnown()
+        probeKnown(force = true)
         Relay.kick()
     }
 
@@ -404,14 +440,14 @@ object Hub {
         sweepJob = scope.launch {
             var tick = 0
             while (isActive) {
-                delay(5000)
+                delay(if (screenOn) 5000L else 30_000L)   // 息屏后放稀，少唤醒
                 tick++
                 val t = now()
                 // 不再有 3 秒一次的广播刷新在线时间：久未见到（60 秒）才探测一次
                 _peers.value.values.filter { it.online && t - it.lastSeen > 60_000 }.forEach { p ->
                     launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
                 }
-                if (tick % 3 == 0) probeKnown()
+                if (screenOn && tick % 3 == 0) probeKnown()   // 息屏时不做局域网探测；亮屏时会马上探测一次（onScreen）
 
                 val hotspotOn = HotspotHost.payload.value != null
                 if ((hotspotOn || (HotspotJoin.active.value && !HotspotJoin.autoMode)) && t - lastActivity > 180_000 &&
@@ -441,13 +477,14 @@ object Hub {
         touch()
         var terminal = false
         _msgs.update { list ->
-            list.map {
-                if (it.id == id) {
-                    val n = f(it)
-                    terminal = n.state == MsgState.DONE || n.state == MsgState.FAILED || n.state == MsgState.CANCELED
-                    n
-                } else it
-            }
+            terminal = false
+            // 传输进度每 120 毫秒来一次：从后往后找那一条（正在传的通常在最后），只换它，没变化就原样返回，不让界面白白刷新
+            val i = list.indexOfLast { it.id == id }
+            if (i < 0) return@update list
+            val old = list[i]
+            val n = f(old)
+            terminal = n.state == MsgState.DONE || n.state == MsgState.FAILED || n.state == MsgState.CANCELED
+            if (n == old) list else ArrayList(list).also { it[i] = n }
         }
         if (terminal) persistSoon()
     }
