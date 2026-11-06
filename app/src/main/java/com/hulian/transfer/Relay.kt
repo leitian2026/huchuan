@@ -67,7 +67,16 @@ object Relay {
     /** 小文件（不分段）同时最多传几个：一次发好几张图片时，同时发起的上传太多，坚果云偶尔会回 503 */
     private val singleGate = Semaphore(2)
 
-    /** 孤儿分段（对应的 .bin 不在了）至少放了这么久才删，免得误删正在上传的 */
+    /**
+     * 消息头文件（第 0 段）在网盘上的扩展名。不能用 .bin：Koofr 的 WebDAV 读 .bin 文件会回 200 和长度却一个字节都不给
+     * （实测只有 .bin 有这个问题，.tmp / .prt / .dat 等都正常）
+     */
+    private const val HEAD_EXT = ".dat"
+    /** 旧版本用的扩展名：收件时仍然认，免得旧版本留在网盘里的消息被漏掉 */
+    private const val OLD_HEAD_EXT = ".bin"
+    private fun isHead(name: String) = name.endsWith(HEAD_EXT) || name.endsWith(OLD_HEAD_EXT)
+
+    /** 孤儿分段（对应的消息头文件不在了）至少放了这么久才删，免得误删正在上传的 */
     private const val ORPHAN_MIN_AGE_MS = 30L * 60 * 1000
     /** 对方暂停发送时，最多等它多久（防止对方的手机没了，这边一直等） */
     private const val SENDER_PAUSE_MAX_MS = 30L * 60 * 1000
@@ -401,7 +410,7 @@ object Relay {
                     try {
                         ctl?.check()
                         WebDav.ensureDir(c, peer.id)
-                        WebDav.put(c, "${peer.id}/$mid.bin", total, ctl) { out ->
+                        WebDav.put(c, "${peer.id}/$mid$HEAD_EXT", total, ctl) { out ->
                             val ins = open?.invoke()
                             try {
                                 RelayCrypto.encrypt(key, meta, ins, out, onProgress)
@@ -436,7 +445,7 @@ object Relay {
         try {
             ctl?.check()
         } catch (e: UserCancelException) {
-            quietDelete(c, "${peer.id}/$mid.bin")   // 上传完的那一刻点了取消：别把文件留在网盘里
+            quietDelete(c, "${peer.id}/$mid$HEAD_EXT")   // 上传完的那一刻点了取消：别把文件留在网盘里
             throw e
         }
         val ack = CompletableDeferred<Boolean>()
@@ -455,7 +464,7 @@ object Relay {
     // ---------- 大文件：分段并行上传 ----------
 
     /**
-     * 文件 = 第 0 段（$mid.bin，带消息头）+ 第 1.. 段（$mid-N.prt），每段是一个独立的加密文件，各自带一个被校验的小消息头
+     * 文件 = 第 0 段（$mid.dat，带消息头）+ 第 1.. 段（$mid-N.prt），每段是一个独立的加密文件，各自带一个被校验的小消息头
      * （消息编号 / 发送者 / 第几段 / 这段多长），所以分段不能被调换、混进别的消息、截断或少收。
      * 几段同时上传；第 0 段传完先通知对方开始收，之后每传完一段再通知一次
      */
@@ -554,7 +563,7 @@ object Relay {
                         Hub.log("Relay", x)
                     }
                 }
-                for (i in uploaded) quietDelete(c, "${peer.id}/" + if (i == 0) "$mid.bin" else "$mid-$i.prt")
+                for (i in uploaded) quietDelete(c, "${peer.id}/" + if (i == 0) "$mid$HEAD_EXT" else "$mid-$i.prt")
             }
             throw e
         } finally {
@@ -571,7 +580,7 @@ object Relay {
         val meta = if (i == 0) headMeta else JSONObject().put("mid", mid).put("from", Store.deviceId)
             .put("idx", i).put("len", plain).toString().toByteArray(Charsets.UTF_8)
         val total = RelayCrypto.encryptedSize(meta.size, plain)
-        val name = if (i == 0) "${peer.id}/$mid.bin" else "${peer.id}/$mid-$i.prt"
+        val name = if (i == 0) "${peer.id}/$mid$HEAD_EXT" else "${peer.id}/$mid-$i.prt"
         var attempt = 0
         while (true) {
             var last = 0L
@@ -699,7 +708,10 @@ object Relay {
         try {
             val c = Store.dav ?: return@withContext
             val entries = WebDav.listEntries(c, Store.deviceId)
-            for (e in entries) if (e.name.endsWith(".bin")) receive(null, e.name.removeSuffix(".bin"))
+            for (e in entries) if (isHead(e.name)) {
+                val x = if (e.name.endsWith(HEAD_EXT)) HEAD_EXT else OLD_HEAD_EXT
+                receive(null, e.name.removeSuffix(x), x)
+            }
             cleanupRemnants(c, entries, ORPHAN_MIN_AGE_MS)   // 收完了顺手把残留清掉（用的是同一份列表，不多发请求）
         } catch (e: Exception) {
             Hub.reportOnce("relay-sweep", "检查${Store.davName}里的未收消息失败", friendlyError(e), techDetail(e))
@@ -707,7 +719,7 @@ object Relay {
     }
 
     /** 收一条：fromHint 是通知里的发送者（扫描网盘时未知，null）。从坚果云下载、解密、记入聊天、删除 */
-    private suspend fun receive(fromHint: String?, mid: String) = withContext(Dispatchers.IO) {
+    private suspend fun receive(fromHint: String?, mid: String, ext: String? = null) = withContext(Dispatchers.IO) {
         if (!midPattern.matches(mid)) return@withContext
         if (doneMids.contains(mid)) {
             live.remove(mid)
@@ -716,6 +728,10 @@ object Relay {
         if (!processing.add(mid)) return@withContext
         val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         var multi: Multi? = null
+        // 知道扩展名（扫描网盘时）就直接用；不知道（收到通知时）先试新的 .dat，找不到再试旧版本的 .bin
+        val exts = if (ext != null) listOf(ext) else listOf(HEAD_EXT, OLD_HEAD_EXT)
+        var extIdx = 0
+        var path = "${Store.deviceId}/$mid${exts[0]}"
         try {
             val c = Store.dav ?: throw IOException("还没填${Store.davName}账号，收不到远程发来的内容")
             val peers = Hub.peers.value.values.filter {
@@ -726,7 +742,6 @@ object Relay {
                 markDone(mid)
                 return@withContext
             }
-            val path = "${Store.deviceId}/$mid.bin"
             // 下载中途被断开（常见：对方刚传完，网盘还没写好）：消息头还没读完整时没有任何副作用，等几秒从头再下一次，最多 2 次；
             // 退避中（刚被 429 限速、请求没发出去）也是等一等再来
             var cuts = 0
@@ -741,6 +756,11 @@ object Relay {
                         }
                     } catch (e: WebDav.DavException) {
                         if (e.code == 404) {
+                            if (extIdx + 1 < exts.size) {   // 换另一个扩展名再找一次
+                                extIdx++
+                                path = "${Store.deviceId}/$mid${exts[extIdx]}"
+                                continue
+                            }
                             markDone(mid) // 已经收过并删除了
                             return@withContext
                         }
@@ -773,7 +793,7 @@ object Relay {
                 // 旧密钥已经没了，以后也不可能解开。删掉它，免得每次重连都再扫到、再弹一次框；只记入错误记录，不打扰
                 Hub.log("远程中转：网盘里有一条解不开的旧内容，已删除（$mid）", e)
                 try {
-                    Store.dav?.let { WebDav.delete(it, "${Store.deviceId}/$mid.bin") }
+                    Store.dav?.let { WebDav.delete(it, path) }
                 } catch (d: Exception) {
                     Hub.log("删除解不开的中转文件", d)
                 }
@@ -788,7 +808,7 @@ object Relay {
             if (m != null) {
                 Store.dav?.let { d ->
                     deleteParts(d, mid, m.n)
-                    quietDelete(d, "${Store.deviceId}/$mid.bin")
+                    quietDelete(d, path)
                 }
                 if (m.peer.id in online.value) {
                     try {
@@ -805,13 +825,13 @@ object Relay {
                 // 对方很久没有继续上传：把已经传上来的残留清掉，免得每次重连都再扫到
                 Store.dav?.let { d ->
                     deleteParts(d, mid, e.n)
-                    quietDelete(d, "${Store.deviceId}/$mid.bin")
+                    quietDelete(d, path)
                 }
             }
         } catch (e: StaleException) {
             markDone(mid)
             Hub.report("远程接收：已丢弃过旧的消息", e, "消息：$mid")
-            try { Store.dav?.let { WebDav.delete(it, "${Store.deviceId}/$mid.bin") } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
+            try { Store.dav?.let { WebDav.delete(it, path) } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
         } catch (e: Exception) {
             markDone(mid) // 失败的也不要在本次运行里反复重试
             Hub.report("远程接收失败", e, "消息：$mid")
@@ -990,18 +1010,19 @@ object Relay {
 
     /**
      * 清理网盘上本机文件夹里的残留（发给本机的内容都在这个文件夹里）：
-     *  - 已经处理过的消息（收完了，或者已经失败结案）还留着的文件：.bin 没删掉、分段没删完
-     *  - 孤儿分段：对应的 .bin 不在了（发送方中途挂了；或者接收方放弃后发送方还在传），放够 minAgeMs 才删
+     *  - 已经处理过的消息（收完了，或者已经失败结案）还留着的文件：消息头文件没删掉、分段没删完
+     *  - 孤儿分段：对应的消息头文件不在了（发送方中途挂了；或者接收方放弃后发送方还在传），放够 minAgeMs 才删
      * 正在接收的消息不碰。返回 (删了几个文件, 约释放多少字节)
      */
     private suspend fun cleanupRemnants(c: DavConfig, entries: List<WebDav.Entry>, minAgeMs: Long): Pair<Int, Long> {
         val now = System.currentTimeMillis()
         fun midOf(name: String): String? = when {
-            name.endsWith(".bin") -> name.removeSuffix(".bin")
+            name.endsWith(HEAD_EXT) -> name.removeSuffix(HEAD_EXT)
+            name.endsWith(OLD_HEAD_EXT) -> name.removeSuffix(OLD_HEAD_EXT)
             name.endsWith(".prt") -> name.removeSuffix(".prt").substringBeforeLast('-', "")   // 消息编号本身带 '-'，最后一个 '-' 后面才是第几段
             else -> null
         }?.takeIf { midPattern.matches(it) }
-        val heads = entries.filter { it.name.endsWith(".bin") }.mapNotNull { midOf(it.name) }.toSet()
+        val heads = entries.filter { isHead(it.name) }.mapNotNull { midOf(it.name) }.toSet()
         var n = 0
         var bytes = 0L
         for (e in entries) {
