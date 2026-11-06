@@ -21,6 +21,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         Hub.appVisible = true
+        Hub.discovery?.refreshLock()   // 界面在前台：持有组播锁，能收到局域网广播
         // 从 root 管理器授权回来：重新检测一次，授权了标签就消失
         if (Root.consumeRecheck()) Root.refresh(force = true)
         // 回到前台时，正在看的聊天里在后台期间收到的消息算已读，并清掉对应通知
@@ -45,6 +46,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         Hub.appVisible = false
+        Hub.discovery?.refreshLock()   // 退到后台：放掉组播锁省电
         if (!Hub.picking) AutoLink.onBackground()
         super.onStop()
     }
