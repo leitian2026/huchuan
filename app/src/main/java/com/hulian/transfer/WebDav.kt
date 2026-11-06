@@ -376,9 +376,10 @@ object WebDav {
         ensureDir(c)
         val tag = newId().take(8)
         val dir = "_selftest"
+        val headExt = Store.relayHeadExt   // 设置里选的消息文件后缀：测的就是实际会用的
         val cases = listOf(
             TestCase("根文件夹里的小文件（6 字节）", "", "tmp", 6, false),
-            TestCase("子文件夹里的消息文件 .dat（150 字节随机内容）", dir, "dat", 150, true),
+            TestCase("子文件夹里的消息文件 .$headExt（150 字节随机内容）", dir, headExt, 150, true),
             TestCase("子文件夹里的分段文件 .prt（150 字节随机内容）", dir, "prt", 150, true),
         )
         val rnd = java.security.SecureRandom()
