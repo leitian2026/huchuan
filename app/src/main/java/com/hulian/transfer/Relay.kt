@@ -68,8 +68,10 @@ object Relay {
         if (!accepted.remove(mid)) return
         val pid = acceptPeer.remove(mid)
         Hub.report("远程接收失败", IOException(reason), "消息：$mid")
-        if (pid != null) {
-            Hub.addMsg(Msg(newId(), pid, false, Kind.FILE, now(), name = "远程文件", state = MsgState.FAILED, error = reason))
+        // 卡片还在（接收没走到创建“接收中”消息那一步）：换成一条写明原因的失败消息
+        if (Hub.msgs.value.any { it.id == mid }) {
+            Hub.removeMsg(mid)
+            if (pid != null) Hub.addMsg(Msg(newId(), pid, false, Kind.FILE, now(), name = "远程文件", state = MsgState.FAILED, error = reason))
         }
     }
     /** 消息头读到文件但还没被接受：中断这次下载，改成放一张待接收的卡片 */
@@ -150,8 +152,36 @@ object Relay {
         val peer: Peer, val key: SecretKeySpec, val mid: String,
         val job: Inbox.FileJob, val n: Int, val psz: Long, val ctl: TransferCtl
     ) {
-        var got = 0L
+        @Volatile var got = 0L
         var last = 0L
+        /** 已经下载进内存、还没写盘的字节数（边下边显示进度用；写盘时按原始大小扣掉） */
+        val inflight = java.util.concurrent.atomic.AtomicLong(0L)
+        /** 后面各段的下载任务（下标 i-1 对应第 i 段）。提前到第 0 段还在收的时候就开始，所以放在能比单次调用活得更久的作用域里 */
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val jobs = java.util.concurrent.CopyOnWriteArrayList<Deferred<ByteArray>>()
+        var launched = 1
+    }
+
+    /** 显示进度：已写盘的 + 正在下载的 */
+    private fun showProgress(m: Multi) {
+        val t = now()
+        if (t - m.last > 120) {
+            m.last = t
+            Inbox.progress(m.job, minOf(m.got + m.inflight.get(), m.job.size))
+        }
+    }
+
+    /** 再开始下载下一段（最多同时 Store.relayParallel 段，窗口随着写盘往后滑） */
+    private fun launchNext(c: DavConfig, m: Multi, lv: Live) {
+        synchronized(m) {
+            if (m.launched >= m.n) return
+            val i = m.launched++
+            m.jobs.add(m.scope.async {
+                m.ctl.gate()   // 暂停中就不开始下载新的分段
+                DavQuota.ensureRoom(m.ctl, 0L, m.psz, 2)   // 坚果云额度快满就自动暂停；2 = 下载 1 次 + 收完后删除 1 次
+                fetchPart(c, m, i, lv)
+            })
+        }
     }
 
     /** 对方中止了发送，或者很久没有继续上传：消息在聊天里已标成失败，不再弹框 */
@@ -874,7 +904,7 @@ object Relay {
                 }
             } else {
                 // 收到的是对方刚发来的通知，对方等着这条消息：仍然提示，但不删文件（下次扫描网盘时再判断）
-                Hub.report("远程接收失败", e, "消息：$mid")
+                if (accepted.contains(mid)) failVisible(mid, friendlyError(e)) else Hub.report("远程接收失败", e, "消息：$mid")
             }
         } catch (e: UserCancelException) {
             // 本机点了取消：把网盘上这条消息的残留清掉，并告诉发送方别再传了
@@ -923,8 +953,10 @@ object Relay {
             try { Store.dav?.let { WebDav.delete(it, path) } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
         } catch (e: Exception) {
             markDone(mid) // 失败的也不要在本次运行里反复重试
-            Hub.report("远程接收失败", e, "消息：$mid")
+            if (accepted.contains(mid)) failVisible(mid, friendlyError(e)) else Hub.report("远程接收失败", e, "消息：$mid")
         } finally {
+            multi?.scope?.cancel()   // 提前开始下载的分段：不管成功失败都停掉
+            if (!offers.containsKey(mid)) Hub.removeMsg(mid)   // 点“接收”后留着的那张卡片：不管结果怎样都不该留下（等待接收的卡片除外）
             multi?.let { Transfers.end(it.job.id, it.ctl) }
             processing.remove(mid)
             live.remove(mid)
@@ -938,7 +970,8 @@ object Relay {
             Hub.removeMsg(mid)
             return
         }
-        Hub.removeMsg(mid)   // 待接收的卡片换成正式的接收消息（Inbox.beginFile 创建）
+        // 卡片先别删：马上变成“接收中 0%”，读到消息头、正式的接收消息建好以后才换掉（receiveFile 里删），中间不会空着
+        Hub.patch(mid) { it.copy(state = MsgState.RECEIVING, done = 0L, error = "") }
         accepted.add(mid)
         acceptPeer[mid] = o.peerId
         live.computeIfAbsent(mid) { Live(o.from) }.optimistic = true
@@ -1005,7 +1038,9 @@ object Relay {
         val job = Inbox.beginFile(peer.id, meta)
         // 聊天里一出现这条消息就有控制柄：取消按钮马上能点（暂停要等确认是分段文件后才开放）
         val ctl = Transfers.begin(job.id)
+        Hub.removeMsg(mid)   // 点“接收”时留着的“接收中 0%”卡片：正式的消息已经建好，换掉它
         var handedOver = false
+        var early: Multi? = null
         try {
             val parts = meta.optInt("parts", 1)
             val psz = meta.optLong("psz", 0L)
@@ -1015,6 +1050,10 @@ object Relay {
                 if (psz < RelayCrypto.CHUNK || psz > MAX_PART || parts.toLong() != (job.size + psz - 1) / psz) {
                     throw IOException("分段信息无效")
                 }
+                // 消息头校验通过：后面的分段马上并行开始下载，不等第 0 段收完
+                val em0 = Multi(peer, key, mid, job, parts, psz, ctl)
+                early = em0
+                Store.dav?.let { dc -> repeat(Store.relayParallel) { launchNext(dc, em0, lv) } }
             }
             val want = if (parts > 1) psz else job.size   // 这个文件里应该有多少数据
             var got = 0L
@@ -1027,21 +1066,28 @@ object Relay {
                 if (got + f.size > want) throw IOException("数据与声明的大小不符")
                 os.write(f)
                 got += f.size
-                val t = now()
-                if (t - last > 120) {
-                    last = t
-                    Inbox.progress(job, got)
+                val em = early
+                if (em != null) {
+                    em.got = got
+                    showProgress(em)
+                } else {
+                    val t = now()
+                    if (t - last > 120) {
+                        last = t
+                        Inbox.progress(job, got)
+                    }
                 }
             }
-            if (parts > 1) {
+            if (early != null) {
                 ctl.canPause = true
                 handedOver = true   // 控制柄交给后面收各段的流程，由它结束
-                return Multi(peer, key, mid, job, parts, psz, ctl).also { it.got = got }
+                return early.also { it.got = got }
             }
             os.close()
             Inbox.finishFile(peer.id, job)
             return null
         } catch (e: Exception) {
+            early?.scope?.cancel()   // 第 0 段失败了：提前开始的分段下载也停掉
             try { job.saved.stream.close() } catch (x: Exception) { Hub.log("Relay", x) }
             if (ctl.cancelled) {
                 Inbox.cancelFile(job)
@@ -1060,29 +1106,17 @@ object Relay {
      */
     private suspend fun finishMulti(c: DavConfig, m: Multi, lv: Live) {
         val ctl = m.ctl
-        val par = Store.relayParallel
         ctl.onCancel = { lv.poke() }   // 取消时唤醒正在等分段通知的下载
         try {
             ctl.check()
-            coroutineScope {
-                val jobs = ArrayList<Deferred<ByteArray>>()
-                var launched = 1
-                fun launchNext() {
-                    if (launched < m.n) {
-                        val i = launched++
-                        jobs.add(async(Dispatchers.IO) {
-                            ctl.gate()   // 暂停中就不开始下载新的分段
-                            DavQuota.ensureRoom(ctl, 0L, m.psz, 2)   // 坚果云额度快满就自动暂停；2 = 下载 1 次 + 收完后删除 1 次
-                            fetchPart(c, m, i, lv)
-                        })
-                    }
-                }
-                repeat(par) { launchNext() }
-                for (i in 1 until m.n) {
-                    val raw = jobs[i - 1].await()
-                    launchNext()
-                    consumePart(raw, i, m)
-                }
+            // 前面几段在第 0 段还没收完时就已经开始下了（receiveFile 里）；这里按顺序取出来写盘，写一段就再开始下一段
+            val par = Store.relayParallel
+            repeat((par - (m.launched - 1)).coerceAtLeast(0)) { launchNext(c, m, lv) }   // 窗口里还差几段就补几段（提前开始的已经算在内）
+            for (i in 1 until m.n) {
+                val raw = m.jobs[i - 1].await()
+                launchNext(c, m, lv)
+                m.inflight.addAndGet(-raw.size.toLong())
+                consumePart(raw, i, m)
             }
             m.job.saved.stream.close()
             if (m.got != m.job.size) throw IOException("远程文件大小对不上（收到 ${fmtSize(m.got)} / ${fmtSize(m.job.size)}）")
@@ -1101,10 +1135,18 @@ object Relay {
     private suspend fun fetchPart(c: DavConfig, m: Multi, i: Int, lv: Live): ByteArray {
         val name = "${Store.deviceId}/${m.mid}-$i.prt"
         val max = m.psz + (m.psz / RelayCrypto.CHUNK + 2) * 20 + 4096
-        fun tryGet(): ByteArray? = try {
-            WebDav.getBytes(c, name, max, m.ctl).also { DavQuota.addDown(it.size.toLong()) }
-        } catch (e: WebDav.DavException) {
-            if (e.code == 404) null else throw e
+        fun tryGet(): ByteArray? {
+            var added = 0L
+            return try {
+                WebDav.getBytes(c, name, max, m.ctl) { d ->
+                    added += d
+                    m.inflight.addAndGet(d)
+                    showProgress(m)
+                }.also { DavQuota.addDown(it.size.toLong()) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
+            } catch (e: Exception) {
+                m.inflight.addAndGet(-added)   // 这次没下成：已经算进去的字节撤回
+                if (e is WebDav.DavException && e.code == 404) null else throw e
+            }
         }
         var waitStart = now()   // 从什么时候开始一直没有新动静（放弃的时间从这里算）
         while (true) {
@@ -1143,11 +1185,7 @@ object Relay {
             os.write(f)
             got += f.size
             m.got += f.size
-            val t = now()
-            if (t - m.last > 120) {
-                m.last = t
-                Inbox.progress(m.job, m.got)
-            }
+            showProgress(m)
         }
         if (reader.next() != null) throw IOException("第 ${i + 1} 段的数据比声明的多")
     }
