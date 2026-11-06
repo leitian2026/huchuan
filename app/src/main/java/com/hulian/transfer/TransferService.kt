@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 class TransferService : Service() {
     private var discovery: Discovery? = null
     private var netCb: ConnectivityManager.NetworkCallback? = null
+    private var screenRx: android.content.BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,9 +50,24 @@ class TransferService : Service() {
             }
         }
         Hub.startSweeper()
-        Hub.probeKnown()
+        Hub.probeKnown(force = true)
         Relay.start()
 
+        if (screenRx == null) {
+            // 亮屏 / 息屏：息屏时后台巡检放稀、停掉局域网探测、放掉组播锁
+            Hub.screenOn = try { getSystemService(android.os.PowerManager::class.java).isInteractive } catch (e: Exception) { true }
+            val rx = object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: android.content.Context, i: Intent) {
+                    Hub.onScreen(i.action == Intent.ACTION_SCREEN_ON)
+                }
+            }
+            screenRx = rx
+            val f = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            try { registerReceiver(rx, f) } catch (e: Exception) { Hub.log("TransferService", e) }
+        }
         if (netCb == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
@@ -83,6 +99,8 @@ class TransferService : Service() {
     }
 
     override fun onDestroy() {
+        screenRx?.let { try { unregisterReceiver(it) } catch (e: Exception) { Hub.log("TransferService", e) } }
+        screenRx = null
         netCb?.let { try { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } catch (e: Exception) { Hub.log("TransferService", e) } }
         netCb = null
         Relay.goodbye()
