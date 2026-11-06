@@ -57,21 +57,74 @@ object Relay {
     private val offers = ConcurrentHashMap<String, Offer>()
     /** 用户点了“接收”的消息编号：receive 再跑到消息头时放行 */
     private val accepted = ConcurrentHashMap.newKeySet<String>()
-    /** 点了“接收”的消息是从哪台设备来的（接收没能开始时，用它在对应聊天里留一条失败消息） */
+    /** 点了“接收”的消息是从哪台设备来的（接收没能开始时，用它在对应聊天里写失败原因） */
     private val acceptPeer = ConcurrentHashMap<String, String>()
+    /** 接收失败、但网盘上的文件还留着、可以点“重试”的消息编号（本次运行内；重启后会当成新到的文件重新出现待接收卡片） */
+    private val keepMids = ConcurrentHashMap.newKeySet<String>()
+    /** 远程发出的文件：消息编号 → 聊天里那条消息的 id（对方回“收完了 / 拒绝了 / 过期了”时用，重启后还在，最多记 300 条） */
+    private val sentMap: MutableMap<String, String> by lazy { java.util.Collections.synchronizedMap(LinkedHashMap(Store.relaySent)) }
+    private fun rememberSent(mid: String, localId: String) {
+        synchronized(sentMap) {
+            sentMap[mid] = localId
+            while (sentMap.size > 300) sentMap.remove(sentMap.keys.first())
+            Store.relaySent = LinkedHashMap(sentMap)
+        }
+    }
+    /** 一个文件传完上传、通知也发出去了：聊天里显示“等待对方接收”（对方收完会回通知改成“已发送”） */
+    private fun markWaiting(localId: String?, header: JSONObject) {
+        if (localId == null || header.optString("type") != "file") return
+        Hub.patch(localId) {
+            if (it.state == MsgState.SENDING || it.state == MsgState.PAUSED) it.copy(state = MsgState.WAITING, done = it.size, error = "") else it
+        }
+    }
+    /** 告诉发送方：这个文件本机已经收完了 */
+    private fun sendGot(peerId: String, mid: String) {
+        Hub.scope.launch {
+            try {
+                sendNotify(peerId, JSONObject().put("mid", mid).put("got", true))
+            } catch (x: Exception) {
+                Hub.log("Relay", x)
+            }
+        }
+    }
+
+    fun canRetryReceive(id: String) = keepMids.contains(id)
+
+    /** 接收失败的文件点“重试”：网盘上的文件还在，直接重新收（不用对方重发，也不用再点“接收”） */
+    fun retryReceive(mid: String) {
+        val m = Hub.msgs.value.firstOrNull { it.id == mid && !it.outgoing && it.state == MsgState.FAILED } ?: return
+        keepMids.remove(mid)
+        synchronized(doneMids) {
+            doneMids.remove(mid)
+            Store.relayDoneMids = doneMids.toList()
+        }
+        accepted.add(mid)
+        acceptPeer[mid] = m.peerId
+        Hub.patch(mid) { it.copy(state = MsgState.RECEIVING, done = 0L, error = "") }
+        Hub.scope.launch(Dispatchers.IO) {
+            // 后缀可能不是默认的：先看一眼网盘里这条消息实际叫什么
+            val ext = try {
+                Store.dav?.let { WebDav.listEntries(it, Store.deviceId) }
+                    ?.firstNotNullOfOrNull { e -> headOf(e.name)?.takeIf { it.first == mid }?.second }
+            } catch (e: Exception) {
+                null
+            }
+            receive(null, mid, ext?.let { ".$it" })
+        }
+    }
 
     /**
-     * 用户点了“接收”之后，接收流程没开始就退出（网盘上找不到文件、已处理过等）：在聊天里留一条写明原因的失败消息，
+     * 用户点了“接收”之后，接收流程没开始就退出（网盘上找不到文件、已处理过等）：把聊天里那条消息原位改成失败并写明原因，
      * 同时记入错误记录，不能让卡片无声无息地消失。没点过“接收”的（自动扫描）不提示
      */
     private fun failVisible(mid: String, reason: String) {
         if (!accepted.remove(mid)) return
         val pid = acceptPeer.remove(mid)
         Hub.report("远程接收失败", IOException(reason), "消息：$mid")
-        // 卡片还在（接收没走到创建“接收中”消息那一步）：换成一条写明原因的失败消息
         if (Hub.msgs.value.any { it.id == mid }) {
-            Hub.removeMsg(mid)
-            if (pid != null) Hub.addMsg(Msg(newId(), pid, false, Kind.FILE, now(), name = "远程文件", state = MsgState.FAILED, error = reason))
+            Hub.patch(mid) { if (it.state == MsgState.FAILED) it else it.copy(state = MsgState.FAILED, error = reason) }
+        } else if (pid != null) {
+            Hub.addMsg(Msg(mid, pid, false, Kind.FILE, now(), name = "远程文件", state = MsgState.FAILED, error = reason))
         }
     }
     /** 消息头读到文件但还没被接受：中断这次下载，改成放一张待接收的卡片 */
@@ -79,6 +132,8 @@ object Relay {
     /** 已处理过的消息 ID：存在本机，重启后还在（最多记 1500 条，再老的靠消息里的时间戳拦） */
     private val doneMids: MutableSet<String> by lazy { java.util.Collections.synchronizedSet(LinkedHashSet(Store.relayDoneMids)) }
     private const val DONE_MAX = 1500
+    /** 对方发来的文件超过这么久一直没接收：自动清掉 */
+    private const val UNACCEPTED_MAX_AGE_MS = 7L * 24 * 3600_000
     /** 消息里（已加密校验）的发送时间比这还早，就当作被人重放的旧文件 */
     private const val MAX_AGE_MS = 30L * 24 * 3600 * 1000
     private val midPattern = Regex("[A-Za-z0-9-]{1,64}")
@@ -410,8 +465,27 @@ object Relay {
                     val mid = body.getString("mid")
                     body.optJSONObject("q")?.let { DavQuota.peerReport(from, it) }   // 对方带来的坚果云用量
                     if (body.optBoolean("qonly")) return   // 只是报用量
-                    if (body.optBoolean("cancel")) {   // 接收方点了取消：发送方停止上传
-                        sending[mid]?.takeIf { it.peerId == from }?.ctl?.cancelByPeer()
+                    if (body.optBoolean("got")) {   // 接收方收完了：发出去的文件从“等待对方接收”变成“已发送”
+                        sentMap[mid]?.let { id ->
+                            Hub.patch(id) {
+                                if (it.outgoing && (it.state == MsgState.WAITING || it.state == MsgState.SENDING)) it.copy(state = MsgState.DONE, done = it.size, error = "") else it
+                            }
+                        }
+                        return
+                    }
+                    if (body.optBoolean("cancel")) {   // 接收方点了取消 / 拒绝 / 一直没接收被清掉：发送方停止上传，或者更新“等待对方接收”
+                        val out = sending[mid]?.takeIf { it.peerId == from }
+                        if (out != null) {
+                            out.ctl?.cancelByPeer()
+                        } else {
+                            sentMap[mid]?.let { id ->
+                                Hub.patch(id) {
+                                    if (it.outgoing && it.state == MsgState.WAITING) {
+                                        it.copy(state = MsgState.CANCELED, error = if (body.optBoolean("expired")) "对方 7 天内没有接收，文件已自动清除" else "对方拒绝了")
+                                    } else it
+                                }
+                            }
+                        }
                         return
                     }
                     if (body.has("pause")) {   // 发送方暂停 / 继续：暂停期间没有新分段不算超时
@@ -491,16 +565,18 @@ object Relay {
     // ---------- 发送 ----------
 
     /** 通过坚果云 + Cloudflare 发给 peer。header 和直连时一样（type=text / file …） */
-    suspend fun send(peer: Peer, header: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit, ctl: TransferCtl? = null) {
+    suspend fun send(peer: Peer, header: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit, ctl: TransferCtl? = null, localId: String? = null) {
         notReadyReason(peer)?.let { throw IOException(it) }
         val s = sock
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
         val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
+        if (localId != null && header.optString("type") == "file") rememberSent(mid, localId)
         val headExt = Store.relayHeadExt
         val psz = partSize(size)
         if (open != null && size > psz) {
             sendParts(peer, header, size, open, onProgress, c, mid, psz, ctl)
+            markWaiting(localId, header)
             return
         }
         ctl?.check()
@@ -565,6 +641,7 @@ object Relay {
             acks.remove(mid)
         }
         reportUsage(peer.id, mid)
+        markWaiting(localId, header)
     }
 
     // ---------- 大文件：分段并行上传 ----------
@@ -828,6 +905,10 @@ object Relay {
     /** 收一条：fromHint 是通知里的发送者（扫描网盘时未知，null）。从坚果云下载、解密、记入聊天、删除 */
     private suspend fun receive(fromHint: String?, mid: String, ext: String? = null) = withContext(Dispatchers.IO) {
         if (!midPattern.matches(mid)) return@withContext
+        if (keepMids.contains(mid) && !accepted.contains(mid)) {   // 失败了在等用户点“重试”：扫描、重复通知都别再弹新的待接收卡片
+            live.remove(mid)
+            return@withContext
+        }
         if (doneMids.contains(mid)) {
             failVisible(mid, "这条消息已经处理过（收完、拒绝或失败过），本机不会再收一次，请让对方重新发送")
             live.remove(mid)
@@ -970,12 +1051,23 @@ object Relay {
             Hub.report("远程接收：已丢弃过旧的消息", e, "消息：$mid")
             try { Store.dav?.let { WebDav.delete(it, path) } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
         } catch (e: Exception) {
-            markDone(mid) // 失败的也不要在本次运行里反复重试
-            if (accepted.contains(mid)) failVisible(mid, friendlyError(e)) else Hub.report("远程接收失败", e, "消息：$mid")
+            if (accepted.contains(mid)) {
+                // 用户点了接收但失败了：网盘上的文件留着，聊天里给“重试”（不记成已处理，也不会被清理）
+                keepMids.add(mid)
+                failVisible(mid, friendlyError(e))
+            } else {
+                markDone(mid) // 自动扫描失败的不要在本次运行里反复重试
+                Hub.report("远程接收失败", e, "消息：$mid")
+            }
         } finally {
             multi?.scope?.cancel()   // 提前开始下载的分段：不管成功失败都停掉
-            if (!offers.containsKey(mid)) Hub.removeMsg(mid)   // 点“接收”后留着的那张卡片：不管结果怎样都不该留下（等待接收的卡片除外）
             multi?.let { Transfers.end(it.job.id, it.ctl) }
+            // 点“接收”后消息还停在“接收中”、却没有传输在跑（没走到开始传就退出了）：不能让它一直转
+            Hub.msgs.value.firstOrNull { it.id == mid }?.let { c ->
+                if (c.state == MsgState.RECEIVING && Transfers.get(mid) == null && !offers.containsKey(mid)) {
+                    Hub.patch(mid) { it.copy(state = MsgState.FAILED, error = "接收没有开始，请重试或让对方重发") }
+                }
+            }
             processing.remove(mid)
             live.remove(mid)
         }
@@ -1007,12 +1099,10 @@ object Relay {
                 if (o.parts > 1) deleteParts(d, mid, o.parts)
                 quietDelete(d, "${Store.deviceId}/$mid${if (o.ext.startsWith(".")) o.ext else "." + o.ext}")
             }
-            if (o.peerId in online.value) {
-                try {
-                    sendNotify(o.peerId, JSONObject().put("mid", mid).put("cancel", true))
-                } catch (x: Exception) {
-                    Hub.log("Relay", x)
-                }
+            try {
+                sendNotify(o.peerId, JSONObject().put("mid", mid).put("cancel", true))   // 对方不在线也发：Cloudflare 会暂存，对方上线就能看到“被拒绝”
+            } catch (x: Exception) {
+                Hub.log("Relay", x)
             }
         }
     }
@@ -1053,10 +1143,10 @@ object Relay {
 
     /** 单文件收完返回 null；分段文件只收完第 0 段，返回还要继续收的状态 */
     private fun receiveFile(mid: String, peer: Peer, key: SecretKeySpec, meta: JSONObject, reader: RelayCrypto.Reader, lv: Live): Multi? {
-        val job = Inbox.beginFile(peer.id, meta)
-        // 聊天里一出现这条消息就有控制柄：取消按钮马上能点（暂停要等确认是分段文件后才开放）
+        // 点“接收”时留着的卡片原位改成“接收中”（同一个 id，列表不会跳）；没有卡片才新建
+        val job = Inbox.beginFile(peer.id, meta, mid)
+        // 聊天里一出现这条消息就有控制柄：取消按钮马上能点（分段文件的暂停也在读到消息头后马上开放，见下）
         val ctl = Transfers.begin(job.id)
-        Hub.removeMsg(mid)   // 点“接收”时留着的“接收中 0%”卡片：正式的消息已经建好，换掉它
         var handedOver = false
         var early: Multi? = null
         try {
@@ -1071,6 +1161,7 @@ object Relay {
                 // 消息头校验通过：后面的分段马上并行开始下载，不等第 0 段收完
                 val em0 = Multi(peer, key, mid, job, parts, psz, ctl)
                 early = em0
+                ctl.canPause = true   // 分段文件读到消息头就能暂停：暂停后不再开始新的分段，第 0 段（最多 4～8 MB）会继续收完
                 Store.dav?.let { dc -> repeat(Store.relayParallel) { launchNext(dc, em0, lv) } }
             }
             val want = if (parts > 1) psz else job.size   // 这个文件里应该有多少数据
@@ -1103,6 +1194,7 @@ object Relay {
             }
             os.close()
             Inbox.finishFile(peer.id, job)
+            sendGot(peer.id, mid)
             return null
         } catch (e: Exception) {
             early?.scope?.cancel()   // 第 0 段失败了：提前开始的分段下载也停掉
@@ -1139,6 +1231,7 @@ object Relay {
             m.job.saved.stream.close()
             if (m.got != m.job.size) throw IOException("远程文件大小对不上（收到 ${fmtSize(m.got)} / ${fmtSize(m.job.size)}）")
             Inbox.finishFile(m.peer.id, m.job)
+            sendGot(m.peer.id, m.mid)
         } catch (e: Exception) {
             try { m.job.saved.stream.close() } catch (x: Exception) { Hub.log("Relay", x) }
             if (ctl.cancelled) {
@@ -1219,6 +1312,26 @@ object Relay {
         fun midOf(name: String): String? = headOf(name)?.first
             ?: if (name.endsWith(".prt")) name.removeSuffix(".prt").substringBeforeLast('-', "").takeIf { uuidPattern.matches(it) } else null   // 消息编号本身带 '-'，最后一个 '-' 后面才是第几段
         val heads = entries.mapNotNull { headOf(it.name)?.first }.toSet()
+        // 对方发来超过 7 天一直没有接收：清掉网盘上的文件、待接收卡片，并告诉发送方
+        val expired = entries.filter { e -> headOf(e.name) != null && e.modified > 0L && now - e.modified > UNACCEPTED_MAX_AGE_MS }
+            .mapNotNull { headOf(it.name)?.first }
+            .filter { it !in processing && !live.containsKey(it) && !accepted.contains(it) }.toSet()
+        for (mid in expired) {
+            val card = Hub.msgs.value.firstOrNull { it.id == mid && !it.outgoing }
+            offers.remove(mid)
+            if (card != null && (card.state == MsgState.OFFERED || card.state == MsgState.FAILED)) {
+                Hub.patch(mid) { it.copy(state = MsgState.CANCELED, error = "对方发来超过 7 天没有接收，已自动清除") }
+            }
+            keepMids.remove(mid)
+            markDone(mid)
+            card?.peerId?.let { pid ->
+                try {
+                    sendNotify(pid, JSONObject().put("mid", mid).put("cancel", true).put("expired", true))
+                } catch (x: Exception) {
+                    Hub.log("Relay", x)
+                }
+            }
+        }
         var n = 0
         var bytes = 0L
         for (e in entries) {
