@@ -369,15 +369,54 @@ object WebDav {
     }
 
     /** 设置页“测试网盘”：建文件夹 → 上传 → 下载 → 删除，任何一步失败都抛出带原因的异常 */
+    /** 测试的每一步：失败时在报错前面写明是第几步，方便定位 */
+    private fun <T> step(n: Int, what: String, block: () -> T): T = try {
+        block()
+    } catch (e: IOException) {
+        throw IOException("第 $n 步（$what）失败：${e.message}", e)
+    }
+
+    /**
+     * 测试网盘：分三步，越往后越接近真实收发。
+     * 1. 根文件夹里传一个 6 字节的 .tmp 再读回来；
+     * 2. 在子文件夹里传一个约 150 字节的随机内容的 .bin（和真实的文字消息大小、内容类似）再读回来；
+     * 3. 用全新连接把第 2 步的文件再读一次（模拟对方的手机从另一条连接来读）。
+     * 哪一步失败，报错里会写明
+     */
     fun test(c: DavConfig) {
         forgetDirs()
         ensureDir(c)
-        val name = "test-" + newId().take(8) + ".tmp"
+        val tag = newId().take(8)
+
+        // 第 1 步
+        val name = "test-$tag.tmp"
         val data = "hulian".toByteArray()
-        put(c, name, data.size.toLong()) { it.write(data) }
-        val got = get(c, name) { it.readBytes() }
-        delete(c, name)
-        if (!got.contentEquals(data)) throw IOException("${Store.davName}读回来的内容和写入的不一致")
+        step(1, "根文件夹里的小文件，6 字节") {
+            put(c, name, data.size.toLong()) { it.write(data) }
+            val got = try { get(c, name) { it.readBytes() } } finally { try { delete(c, name) } catch (e: Exception) { Hub.log("测试网盘", e) } }
+            if (!got.contentEquals(data)) throw IOException("读回来的内容和写入的不一致")
+        }
+
+        // 第 2、3 步：子文件夹里的 .bin
+        val dir = "_selftest"
+        val bin = "$dir/test-$tag.bin"
+        val blob = ByteArray(150).also { java.security.SecureRandom().nextBytes(it) }
+        try {
+            step(2, "子文件夹里的 .bin，150 字节随机内容") {
+                ensureDir(c, dir)
+                put(c, bin, blob.size.toLong()) { it.write(blob) }
+                val got = get(c, bin) { it.readBytes() }
+                if (!got.contentEquals(blob)) throw IOException("读回来的内容和写入的不一致（收到 ${got.size} 字节）")
+            }
+            step(3, "同一个文件，换一条全新连接再读") {
+                val got = get(c, bin, fresh = true) { it.readBytes() }
+                if (!got.contentEquals(blob)) throw IOException("读回来的内容和写入的不一致（收到 ${got.size} 字节）")
+            }
+        } finally {
+            try { delete(c, bin) } catch (e: Exception) { Hub.log("测试网盘", e) }
+            try { delete(c, dir) } catch (e: Exception) { Hub.log("测试网盘", e) }
+            forgetDirs()
+        }
     }
 }
 
