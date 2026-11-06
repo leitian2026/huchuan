@@ -335,30 +335,49 @@ object Relay {
     /** 当前有没有可用的上网网络（查不出来就当有，别因为判断失误一直不连） */
     private fun hasNetwork(): Boolean = try {
         val cm = Hub.app.getSystemService(android.net.ConnectivityManager::class.java)
-        val n = cm.activeNetwork
-        n != null && cm.getNetworkCapabilities(n)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        fun net(n: android.net.Network?) = n != null && cm.getNetworkCapabilities(n)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        // 后台受限时 activeNetwork 可能拿不到：再看一眼所有网络，别误判成“没有网络”
+        @Suppress("DEPRECATION")
+        net(cm.activeNetwork) || cm.allNetworks.any { net(it) }
     } catch (e: Exception) {
         true
+    }
+
+    /** 这一轮连接有没有成功建立过（区分“连上后正常断开”和“一直连不上”） */
+    @Volatile private var openedThisRound = false
+    private var connectFails = 0
+
+    /** 界面回到前台：没连上就马上重连，不等退避（事件触发，不是定时） */
+    fun onForeground() {
+        if (configured() && !connected.value) kick()
     }
 
     private suspend fun loop() {
         while (currentCoroutineContext().isActive) {
             if (!hasNetwork()) {
-                // 没有网络：别每分钟白白试一次连接。网络恢复时系统回调会 kick() 唤醒这里；5 分钟兜底再看一眼
+                // 没有网络：别白白试连接。网络恢复 / 回到前台时会 kick() 唤醒这里；每分钟只在本机查一次网络状态兜底（不联网，几乎不耗电），
+                // 因为后台受限时系统可能误报“没有网络”，不能一直傻等
                 connected.value = false
                 presence.value = false
                 online.value = emptySet()
                 state.value = "未连接：当前没有网络，恢复后自动重连"
-                withTimeoutOrNull(5 * 60_000L) { wake.receive() }
+                withTimeoutOrNull(60_000L) { wake.receive() }
                 continue
             }
             val why = connectOnce()
             connected.value = false
             presence.value = false
             online.value = emptySet()
-            Hub.log("远程中转", IOException(why))
+            // 连上过又断开（休眠、切网络、服务器心跳超时）是正常现象，会自动重连，不记录也不弹窗；
+            // 一次都没连上才算连不上，连续 3 次以上才记入错误记录并提示
+            val opened = openedThisRound
+            openedThisRound = false
+            if (opened) connectFails = 0 else connectFails++
             state.value = "未连接：$why（${backoff / 1000} 秒后重试）"
-            Hub.reportOnce("relay-conn", "远程中转连不上 Cloudflare", why, "地址：" + Store.relayUrl)
+            if (!opened && connectFails >= 3) {
+                if (connectFails == 3 || connectFails % 10 == 0) Hub.log("远程中转", IOException(why))
+                Hub.reportOnce("relay-conn", "远程中转连不上 Cloudflare", why, "地址：" + Store.relayUrl)
+            }
             withTimeoutOrNull(backoff) { wake.receive() }
             backoff = minOf(backoff * 2, 60_000L)
         }
@@ -380,6 +399,7 @@ object Relay {
         val s = Http.ws.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connected.value = true
+                openedThisRound = true
                 backoff = 2000L
                 state.value = if (Store.dav == null) "已连接（但${Store.davName}账号没填，收不到内容）" else "已连接"
                 // 断线重连：断开期间可能漏了分段通知，正在接收的文件直接去网盘看一眼
@@ -415,8 +435,10 @@ object Relay {
                 delay(25_000)
                 val seen = lastRx
                 s.send("ping")
+                val t0 = now()
                 delay(10_000)
-                if (lastRx == seen) {
+                // 实际等了远不止 10 秒：说明进程被系统冻结过（回应可能就压在队列里还没处理），这一轮不判，下一轮再看，免得白白重连
+                if (lastRx == seen && now() - t0 < 20_000L) {
                     closed.complete("连接已失效（发出心跳后 10 秒没有任何回应）")
                     break
                 }
@@ -896,7 +918,7 @@ object Relay {
             for (e in entries) headOf(e.name)?.let { (m, x) -> receive(null, m, ".$x") }
             cleanupRemnants(c, entries, ORPHAN_MIN_AGE_MS)   // 收完了顺手把残留清掉（用的是同一份列表，不多发请求）
         } catch (e: Exception) {
-            Hub.reportOnce("relay-sweep", "检查${Store.davName}里的未收消息失败", friendlyError(e), techDetail(e))
+            Hub.log("检查${Store.davName}里的未收消息失败", e)   // 后台动作，偶发网络问题很常见：只记录，不弹窗
         } finally {
             sweeping.set(false)
         }
