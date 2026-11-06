@@ -953,7 +953,7 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
         MsgState.PAUSED -> if (m.error.isNotEmpty()) "已暂停：${m.error}" else "已暂停 ${(pct * 100).toInt()}%"
         MsgState.CANCELED -> "已取消"
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
-        MsgState.FAILED -> "失败"
+        MsgState.FAILED -> if (m.error.isNotEmpty()) "失败：${m.error}" else "失败"
         MsgState.OFFERED -> "待接收"
     }
     val isApk = (m.file.ifEmpty { m.name }).let { it.endsWith(".apk", true) || it.endsWith(".apks", true) }
