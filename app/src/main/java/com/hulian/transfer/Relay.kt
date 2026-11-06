@@ -158,7 +158,7 @@ object Relay {
         val inflight = java.util.concurrent.atomic.AtomicLong(0L)
         /** 后面各段的下载任务（下标 i-1 对应第 i 段）。提前到第 0 段还在收的时候就开始，所以放在能比单次调用活得更久的作用域里 */
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val jobs = java.util.concurrent.CopyOnWriteArrayList<Deferred<ByteArray>>()
+        val jobs = java.util.concurrent.CopyOnWriteArrayList<Deferred<okio.Buffer>>()
         var launched = 1
     }
 
@@ -277,8 +277,26 @@ object Relay {
         return "$base/ws"
     }
 
+    /** 当前有没有可用的上网网络（查不出来就当有，别因为判断失误一直不连） */
+    private fun hasNetwork(): Boolean = try {
+        val cm = Hub.app.getSystemService(android.net.ConnectivityManager::class.java)
+        val n = cm.activeNetwork
+        n != null && cm.getNetworkCapabilities(n)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    } catch (e: Exception) {
+        true
+    }
+
     private suspend fun loop() {
         while (currentCoroutineContext().isActive) {
+            if (!hasNetwork()) {
+                // 没有网络：别每分钟白白试一次连接。网络恢复时系统回调会 kick() 唤醒这里；5 分钟兜底再看一眼
+                connected.value = false
+                presence.value = false
+                online.value = emptySet()
+                state.value = "未连接：当前没有网络，恢复后自动重连"
+                withTimeoutOrNull(5 * 60_000L) { wake.receive() }
+                continue
+            }
             val why = connectOnce()
             connected.value = false
             presence.value = false
@@ -1115,7 +1133,7 @@ object Relay {
             for (i in 1 until m.n) {
                 val raw = m.jobs[i - 1].await()
                 launchNext(c, m, lv)
-                m.inflight.addAndGet(-raw.size.toLong())
+                m.inflight.addAndGet(-raw.size)
                 consumePart(raw, i, m)
             }
             m.job.saved.stream.close()
@@ -1132,17 +1150,17 @@ object Relay {
         }
     }
 
-    private suspend fun fetchPart(c: DavConfig, m: Multi, i: Int, lv: Live): ByteArray {
+    private suspend fun fetchPart(c: DavConfig, m: Multi, i: Int, lv: Live): okio.Buffer {
         val name = "${Store.deviceId}/${m.mid}-$i.prt"
         val max = m.psz + (m.psz / RelayCrypto.CHUNK + 2) * 20 + 4096
-        fun tryGet(): ByteArray? {
+        fun tryGet(): okio.Buffer? {
             var added = 0L
             return try {
-                WebDav.getBytes(c, name, max, m.ctl) { d ->
+                WebDav.getBuffer(c, name, max, m.ctl) { d ->
                     added += d
                     m.inflight.addAndGet(d)
                     showProgress(m)
-                }.also { DavQuota.addDown(it.size.toLong()) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
+                }.also { DavQuota.addDown(it.size) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
             } catch (e: Exception) {
                 m.inflight.addAndGet(-added)   // 这次没下成：已经算进去的字节撤回
                 if (e is WebDav.DavException && e.code == 404) null else throw e
@@ -1169,8 +1187,8 @@ object Relay {
         }
     }
 
-    private fun consumePart(raw: ByteArray, i: Int, m: Multi) {
-        val reader = RelayCrypto.Reader(ByteArrayInputStream(raw))
+    private fun consumePart(raw: okio.Buffer, i: Int, m: Multi) {
+        val reader = RelayCrypto.Reader(raw.inputStream())
         val (_, metaBytes) = reader.open(listOf(m.key)) ?: throw IOException("第 ${i + 1} 段解不开：密钥对不上")
         val pm = JSONObject(String(metaBytes, Charsets.UTF_8))
         val want = minOf(m.psz, m.job.size - i * m.psz)
