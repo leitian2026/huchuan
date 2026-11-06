@@ -368,54 +368,55 @@ object WebDav {
         }
     }
 
-    /** 设置页“测试网盘”：建文件夹 → 上传 → 下载 → 删除，任何一步失败都抛出带原因的异常 */
-    /** 测试的每一步：失败时在报错前面写明是第几步，方便定位 */
-    private fun <T> step(n: Int, what: String, block: () -> T): T = try {
-        block()
-    } catch (e: IOException) {
-        throw IOException("第 $n 步（$what）失败：${e.message}", e)
-    }
+    /** 测试网盘用的一组条件：放在哪个文件夹、什么扩展名、多大、内容是随机二进制还是文本 */
+    private class TestCase(val label: String, val dir: String, val ext: String, val size: Int, val random: Boolean)
 
     /**
-     * 测试网盘：分三步，越往后越接近真实收发。
-     * 1. 根文件夹里传一个 6 字节的 .tmp 再读回来；
-     * 2. 在子文件夹里传一个约 150 字节的随机内容的 .bin（和真实的文字消息大小、内容类似）再读回来；
-     * 3. 用全新连接把第 2 步的文件再读一次（模拟对方的手机从另一条连接来读）。
-     * 哪一步失败，报错里会写明
+     * 测试网盘：每一组条件各传一个文件再读回来，互相独立，一组失败不影响后面的。
+     * 条件一次只变一个（文件夹 / 扩展名 / 大小 / 内容），全部跑完列出每组的结果，失败的话就能看出是哪个条件触发的
      */
     fun test(c: DavConfig) {
         forgetDirs()
         ensureDir(c)
         val tag = newId().take(8)
-
-        // 第 1 步
-        val name = "test-$tag.tmp"
-        val data = "hulian".toByteArray()
-        step(1, "根文件夹里的小文件，6 字节") {
-            put(c, name, data.size.toLong()) { it.write(data) }
-            val got = try { get(c, name) { it.readBytes() } } finally { try { delete(c, name) } catch (e: Exception) { Hub.log("测试网盘", e) } }
-            if (!got.contentEquals(data)) throw IOException("读回来的内容和写入的不一致")
-        }
-
-        // 第 2、3 步：子文件夹里的 .bin
         val dir = "_selftest"
-        val bin = "$dir/test-$tag.bin"
-        val blob = ByteArray(150).also { java.security.SecureRandom().nextBytes(it) }
-        try {
-            step(2, "子文件夹里的 .bin，150 字节随机内容") {
-                ensureDir(c, dir)
-                put(c, bin, blob.size.toLong()) { it.write(blob) }
-                val got = get(c, bin) { it.readBytes() }
-                if (!got.contentEquals(blob)) throw IOException("读回来的内容和写入的不一致（收到 ${got.size} 字节）")
+        val cases = listOf(
+            TestCase("根文件夹 · .tmp · 6 字节文本（基准）", "", "tmp", 6, false),
+            TestCase("根文件夹 · .tmp · 150 字节随机内容", "", "tmp", 150, true),
+            TestCase("根文件夹 · .bin · 6 字节文本", "", "bin", 6, false),
+            TestCase("子文件夹 · .tmp · 6 字节文本", dir, "tmp", 6, false),
+            TestCase("根文件夹 · .tmp · 150 字节文本", "", "tmp", 150, false),
+            TestCase("子文件夹 · .bin · 150 字节随机内容（和真实消息一样）", dir, "bin", 150, true),
+        )
+        val rnd = java.security.SecureRandom()
+        val lines = StringBuilder()
+        var failed = 0
+        var firstErr: String? = null
+        for ((i, t) in cases.withIndex()) {
+            val sub = (if (t.dir.isEmpty()) "" else t.dir + "/") + "test-$tag-$i.${t.ext}"
+            val data = if (t.random) ByteArray(t.size).also { rnd.nextBytes(it) }
+                else ByteArray(t.size) { "hulian-"[it % 7].code.toByte() }
+            val err: String? = try {
+                if (t.dir.isNotEmpty()) ensureDir(c, t.dir)
+                put(c, sub, data.size.toLong()) { it.write(data) }
+                val got = get(c, sub) { it.readBytes() }
+                if (!got.contentEquals(data)) throw IOException("读回来的内容和写入的不一致（收到 ${got.size} 字节）")
+                null
+            } catch (e: IOException) {
+                e.message ?: e.javaClass.simpleName
+            } finally {
+                try { delete(c, sub) } catch (e: Exception) { Hub.log("测试网盘", e) }
             }
-            step(3, "同一个文件，换一条全新连接再读") {
-                val got = get(c, bin, fresh = true) { it.readBytes() }
-                if (!got.contentEquals(blob)) throw IOException("读回来的内容和写入的不一致（收到 ${got.size} 字节）")
+            lines.append(if (err == null) "✓ " else "✗ ").append(t.label).append('\n')
+            if (err != null) {
+                failed++
+                if (firstErr == null) firstErr = "第 ${i + 1} 组（${t.label}）：$err"
             }
-        } finally {
-            try { delete(c, bin) } catch (e: Exception) { Hub.log("测试网盘", e) }
-            try { delete(c, dir) } catch (e: Exception) { Hub.log("测试网盘", e) }
-            forgetDirs()
+        }
+        try { delete(c, dir) } catch (e: Exception) { Hub.log("测试网盘", e) }
+        forgetDirs()
+        if (failed > 0) {
+            throw IOException("${cases.size} 组测试里有 $failed 组失败：\n$lines\n第一个失败的详情：\n$firstErr")
         }
     }
 }
