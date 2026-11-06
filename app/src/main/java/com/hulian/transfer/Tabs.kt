@@ -403,6 +403,7 @@ fun SettingsContent() {
                 }
             }
         }
+        BatteryCard()
         SettingsCard {
             CardTitle(
                 "接收文件保存位置",
@@ -423,7 +424,7 @@ fun SettingsContent() {
         SettingsCard {
             CardTitle("错误记录", help = "程序里出过的错误（包括没有弹窗打扰你的次要错误）都记在这里。反馈问题时，点“查看”再点“复制”发给开发者。")
             Row(horizontalArrangement = BtnRowGap) {
-                ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText()) }
+                ActionBtn("查看", filled = true) { Hub.fail("错误记录", "最近的错误记录（最新的在最下面）", Hub.errorLogText(), log = false) }
                 ActionBtn("清空") { Hub.clearErrorLog(); Hub.toast("已清空") }
                 EmptySlot()
             }
@@ -433,4 +434,51 @@ fun SettingsContent() {
         "当前版本 $ver", fontSize = 12.sp, color = Gray, textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
     )
+}
+
+
+/** 后台运行：系统的“电池优化”会在息屏、退到后台一阵之后冻结 App 的联网，远程中转的连接就会断。让用户把本 App 设成不受限制 */
+@Composable
+private fun BatteryCard() {
+    val ctx = LocalContext.current
+    fun check(): Boolean = try {
+        ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+    } catch (e: Exception) {
+        true
+    }
+    var ignoring by remember { mutableStateOf(check()) }
+    // 从系统设置页回来时重新检查一次（只在回到前台这个事件上检查，不轮询）
+    val act = ctx as? androidx.activity.ComponentActivity
+    DisposableEffect(act) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, ev ->
+            if (ev == androidx.lifecycle.Lifecycle.Event.ON_RESUME) ignoring = check()
+        }
+        act?.lifecycle?.addObserver(obs)
+        onDispose { act?.lifecycle?.removeObserver(obs) }
+    }
+    SettingsCard {
+        CardTitle(
+            "后台运行",
+            help = "手机息屏或退到后台一阵之后，系统的“电池优化”会暂停 App 联网，远程中转的连接就会断开，回来要重新连。" +
+                "把本 App 设成“不受限制”（不同品牌叫“无限制”“允许后台高耗电”等）可以明显改善；华为、小米、OPPO、vivo 等还要在手机管家里允许“自启动”和“后台运行”。" +
+                "代价是后台会多耗一点电。"
+        )
+        StatusLine(if (ignoring) "已不受电池优化限制" else "受电池优化限制，后台可能断开", ignoring)
+        if (!ignoring) {
+            Row(horizontalArrangement = BtnRowGap) {
+                ActionBtn("去设置", filled = true) {
+                    try {
+                        ctx.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (e: Exception) {
+                        try {
+                            ctx.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        } catch (x: Exception) {
+                            Hub.log("电池优化设置", x)
+                        }
+                    }
+                }
+                EmptySlot()
+            }
+        }
+    }
 }
