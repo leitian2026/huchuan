@@ -371,6 +371,7 @@ object Hub {
             val p = map[id] ?: return@update map
             if (!p.online) map else map + (id to p.copy(online = false))
         }
+        pokeSweeper()   // 刚离线：该排上这台的探测了
     }
 
     fun forgetPeer(id: String) {
@@ -401,6 +402,7 @@ object Hub {
             val t = now()
             _peers.value.values.filter { !it.online && it.paired && it.host.isNotEmpty() }.forEach { p ->
                 if (!force && t < (probeNext[p.id] ?: 0L)) return@forEach
+                probeNext[p.id] = t + 15_000L   // 先记下：结果出来之前定时器不会再重复探测同一台
                 launch {
                     if (Net.ping(p)) {
                         probeFails.remove(p.id)
@@ -421,7 +423,20 @@ object Hub {
         screenOn = on
         discovery?.refreshLock()
         if (on) probeKnown(force = true)
+        pokeSweeper()
     }
+
+    /** 离线设备下一次最早什么时候该探测（毫秒后）；没有要探测的、或息屏中返回 null */
+    private fun nextProbeDelayMs(): Long? {
+        if (!screenOn) return null
+        val t = now()
+        return _peers.value.values.filter { !it.online && it.paired && it.host.isNotEmpty() }
+            .minOfOrNull { ((probeNext[it.id] ?: 0L) - t).coerceAtLeast(1000L) }
+    }
+
+    private val sweepWake = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    /** 有事情变了（网络、亮屏、设备上下线…），让巡检马上重新算一遍该做什么、什么时候再醒 */
+    fun pokeSweeper() { sweepWake.trySend(Unit) }
 
     fun rescan() {
         discovery?.restart()
@@ -431,33 +446,46 @@ object Hub {
     fun onNetworkChanged() {
         discovery?.restart()
         probeKnown(force = true)
+        pokeSweeper()
         Relay.kick()
     }
 
     /** 后台巡检：在线设备久未见到就探测一次；定期重试离线设备；热点空闲自动断开 */
+    /**
+     * 后台巡检。不再按固定间隔转圈：每次醒来先做该做的，再算出“下一件事最早什么时候要做”，睡到那一刻
+     * （或者有事件 pokeSweeper 叫醒）。算不出来时才睡到兜底的上限（亮屏 60 秒、息屏 5 分钟），因为热点是否开了这类状态没有事件通知
+     */
     fun startSweeper() {
         if (sweepJob?.isActive == true) return
         sweepJob = scope.launch {
-            var tick = 0
+            val pinged = HashMap<String, Long>()   // 每台在线设备上次探测的时间
             while (isActive) {
-                delay(if (screenOn) 5000L else 30_000L)   // 息屏后放稀，少唤醒
-                tick++
                 val t = now()
-                // 不再有 3 秒一次的广播刷新在线时间：久未见到（60 秒）才探测一次
-                _peers.value.values.filter { it.online && t - it.lastSeen > 60_000 }.forEach { p ->
-                    launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
+                var next = if (screenOn) 60_000L else 300_000L
+                // 在线设备：久未见到（60 秒）才探测一次，没到点就记下离到点还有多久
+                _peers.value.values.filter { it.online }.forEach { p ->
+                    val due = maxOf(p.lastSeen, pinged[p.id] ?: 0L) + 60_000L
+                    if (t >= due) {
+                        pinged[p.id] = t
+                        launch { if (Net.ping(p)) markOnline(p.id) else setOffline(p.id) }
+                        next = minOf(next, 60_000L)
+                    } else next = minOf(next, due - t)
                 }
-                if (screenOn && tick % 3 == 0) probeKnown()   // 息屏时不做局域网探测；亮屏时会马上探测一次（onScreen）
+                // 离线设备：局域网探测（失败了自己退避）；息屏时不探测
+                if (screenOn) probeKnown()
+                nextProbeDelayMs()?.let { next = minOf(next, it) }
 
                 val hotspotOn = HotspotHost.payload.value != null
-                if ((hotspotOn || (HotspotJoin.active.value && !HotspotJoin.autoMode)) && t - lastActivity > 180_000 &&
-                    _msgs.value.none { it.active }
-                ) {
+                val hotspotLive = hotspotOn || (HotspotJoin.active.value && !HotspotJoin.autoMode)
+                if (hotspotLive && t - lastActivity > 180_000 && _msgs.value.none { it.active }) {
                     HotspotJoin.leave()
                     HotspotHost.stop()
                     if (hotspotOn) HotspotHost.error.value = "热点已因空闲自动关闭，请重新打开"
                     toast("空闲已自动断开热点连接")
+                } else if (hotspotLive) {
+                    next = minOf(next, (lastActivity + 180_000L - t).coerceAtLeast(10_000L))   // 距离“空闲 3 分钟”还有多久
                 }
+                kotlinx.coroutines.withTimeoutOrNull(next.coerceAtLeast(1000L)) { sweepWake.receive() }
             }
         }
     }
@@ -649,14 +677,15 @@ object Hub {
                 }
                 val t = total
                 var last = 0L
-                transport(peer, h, t, open, ctl) { done ->
+                transport(peer, h, t, open, ctl, m.id) { done ->
                     val n = now()
                     if (n - last > 120 || done == t) {
                         last = n
                         patch(m.id) { it.copy(done = done) }
                     }
                 }
-                patch(m.id) { it.copy(state = MsgState.DONE, done = t) }
+                // 远程发的文件已经上传好、在等对方接收时是“等待对方接收”（Relay 里设的），别盖回“已发送”；也别盖掉对方已经回的状态
+                patch(m.id) { if (it.state == MsgState.SENDING || it.state == MsgState.PAUSED) it.copy(state = MsgState.DONE, done = t) else it }
             } catch (e: Exception) {
                 if (ctl.cancelled) {
                     patch(m.id) { it.copy(state = MsgState.CANCELED, error = if (ctl.byPeer) "对方取消了" else "") }
@@ -674,7 +703,7 @@ object Hub {
      * 选择传输方式：能直连就直连（快、不耗网盘额度）；对方离线、直连连不上，且远程中转已设置好，就改走 Cloudflare + 坚果云。
      * 两种都失败时，把两边的原因都告诉用户
      */
-    private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, ctl: TransferCtl, onProgress: (Long) -> Unit) {
+    private suspend fun transport(peer: Peer, h: JSONObject, size: Long, open: (() -> InputStream)?, ctl: TransferCtl, localId: String?, onProgress: (Long) -> Unit) {
         ctl.check()
         val relayOk = Relay.ready(peer)
         // 同一个 Wi-Fi（或热点已经连上）：局域网直连又快又不占网盘，优先走直连，不管远程中转在不在线
@@ -685,7 +714,7 @@ object Hub {
         // 对方没连 Cloudflare 的话走远程它也收不到，所以这种情况不走
         if (!local && relayOk && Relay.connected.value && peer.id in Relay.online.value) {
             try {
-                Relay.send(peer, h, size, open, onProgress, ctl)
+                Relay.send(peer, h, size, open, onProgress, ctl, localId)
                 return
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -696,12 +725,12 @@ object Hub {
             }
         }
         if (relayOk && !peer.online && Relay.connected.value) {
-            Relay.send(peer, h, size, open, onProgress, ctl)
+            Relay.send(peer, h, size, open, onProgress, ctl, localId)
             return
         }
         if (!direct) {
             if (!relayOk) throw IOException("同一 Wi-Fi 和热点在设置里都关着，远程中转也没有设置好，没有可用的传输方式（设置 → 传输方式）")
-            Relay.send(peer, h, size, open, onProgress, ctl)
+            Relay.send(peer, h, size, open, onProgress, ctl, localId)
             return
         }
         try {
@@ -710,7 +739,7 @@ object Hub {
             if (ctl.cancelled) throw UserCancelException()
             if (!relayOk) throw e
             try {
-                Relay.send(peer, h, size, open, onProgress, ctl)
+                Relay.send(peer, h, size, open, onProgress, ctl, localId)
             } catch (e2: Exception) {
                 if (ctl.cancelled) throw UserCancelException()
                 throw IOException("直连失败（" + friendlyError(e) + "）；远程中转也失败了（" + friendlyError(e2) + "）", e2)
