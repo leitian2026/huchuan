@@ -247,9 +247,9 @@ object WebDav {
         call(req, "上传").close()
     }
 
-    private fun getReq(c: DavConfig, sub: String, tag: Any?, fresh: Boolean = false): Request =
+    private fun getReq(c: DavConfig, sub: String, tag: Any?): Request =
         if (c.s3) S3.request(c, "GET", S3.objUrl(c, sub), null, tag)
-        else builder(c, url(c, sub)).get().tag(tag).apply { if (fresh) header("Connection", "close") }.build()
+        else builder(c, url(c, sub)).get().tag(tag).build()
 
     /** 服务器响应里排查用得上的几项，写进“下载中途断开”的报错里 */
     private fun respInfo(r: Response): String {
@@ -259,13 +259,8 @@ object WebDav {
         return "HTTP ${r.code} ${r.protocol}" + if (parts.isEmpty()) "" else "；" + parts.joinToString("；")
     }
 
-    /**
-     * fresh=true：先清掉连接池里的旧连接，并让服务器回完就关连接（Connection: close），用一条全新的连接下载。
-     * 下载被中途断开后重试时用，排除“复用了一条已经半断开的旧连接”这种情况
-     */
-    fun <T> get(c: DavConfig, sub: String, tag: Any? = null, fresh: Boolean = false, block: (InputStream) -> T): T {
-        if (fresh) Http.dav.connectionPool.evictAll()
-        return call(getReq(c, sub, tag, fresh), "下载").use { r ->
+    fun <T> get(c: DavConfig, sub: String, tag: Any? = null, block: (InputStream) -> T): T {
+        return call(getReq(c, sub, tag), "下载").use { r ->
             val total = r.body!!.contentLength()   // 服务器声明的大小，-1 表示没给
             val cin = CountingInputStream(r.body!!.byteStream())
             try {
@@ -277,7 +272,7 @@ object WebDav {
                 throw StreamCutException(
                     "${Store.davName}下载时连接被中途断开，内容没收完整：已收到 ${fmtSize(cin.count)}（${cin.count} 字节），服务器声明共 $declared。" +
                         "常见原因：对方刚传完、网盘那边还没写好，或网络不稳；一般过几秒再收就好。" +
-                        "服务器响应：${respInfo(r)}${if (fresh) "；这次是用全新连接下载的" else ""}",
+                        "服务器响应：${respInfo(r)}",
                     e
                 )
             }
@@ -372,18 +367,20 @@ object WebDav {
     private class TestCase(val label: String, val dir: String, val ext: String, val size: Int, val random: Boolean)
 
     /**
-     * 测试网盘：每一组条件各传一个文件再读回来，互相独立，一组失败不影响后面的。
-     * 现在每组都是“子文件夹里 150 字节随机内容”，只换扩展名，全部跑完列出每个后缀是否能正常读回来
+     * 测试网盘：每一组各传一个文件再读回来，互相独立，一组失败不影响后面的，全部跑完列出每组结果。
+     * 这三组对应真实收发用到的几种文件：小文件、子文件夹里的消息头文件（.dat）、分段文件（.prt）。
+     * 请求次数有限制的网盘（坚果云、Koofr）上每点一次约发 10 个请求，所以不要多加组
      */
     fun test(c: DavConfig) {
         forgetDirs()
         ensureDir(c)
         val tag = newId().take(8)
         val dir = "_selftest"
-        // 每组都是 150 字节随机内容，只换扩展名：找出哪些后缀这个网盘能正常读回来
-        val cases = listOf("tmp", "bin", "prt", "dat", "enc", "msg", "hl", "txt").map {
-            TestCase("扩展名 .$it", dir, it, 150, true)
-        }
+        val cases = listOf(
+            TestCase("根文件夹里的小文件（6 字节）", "", "tmp", 6, false),
+            TestCase("子文件夹里的消息文件 .dat（150 字节随机内容）", dir, "dat", 150, true),
+            TestCase("子文件夹里的分段文件 .prt（150 字节随机内容）", dir, "prt", 150, true),
+        )
         val rnd = java.security.SecureRandom()
         val lines = StringBuilder()
         var failed = 0
