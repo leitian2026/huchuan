@@ -53,6 +53,7 @@ private fun RelaySettingsCardBody() {
     var davUser by remember { mutableStateOf(Store.davUser) }
     var davPass by remember { mutableStateOf(Store.davPass) }
     var davDir by remember { mutableStateOf(Store.davDir) }
+    var headExt by remember { mutableStateOf(Store.relayHeadExt) }
     var doh by remember { mutableStateOf(Store.dohUrl) }
     var hostsOn by remember { mutableStateOf(Store.hostsOn) }
     var hosts by remember { mutableStateOf(Store.hostsText) }
@@ -83,6 +84,7 @@ private fun RelaySettingsCardBody() {
         Store.davUser = davUser.trim()
         Store.davPass = davPass.trim()
         Store.davDir = davDir.trim().trim('/').ifEmpty { "hulian-relay" }
+        Store.relayHeadExt = headExt.trim().trimStart('.').lowercase().takeIf { Relay.headExtOk(it) } ?: "dat"
         Store.dohUrl = doh.trim()
         Store.hostsText = hosts.trim()
         Store.hostsOn = hostsOn
@@ -112,6 +114,7 @@ private fun RelaySettingsCardBody() {
         davUser = Store.davUser
         davPass = Store.davPass
         davDir = Store.davDir
+        headExt = Store.relayHeadExt
         WebDav.forgetDirs()
         Relay.restart()
     }
@@ -228,6 +231,22 @@ private fun RelaySettingsCardBody() {
             Field(cur.userLabel, davUser) { davUser = it }
             Field(cur.passLabel, davPass, secretField = true) { davPass = it }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
+            SubTitle("消息文件后缀")
+            NoteText(
+                "消息在网盘里的文件名后缀（不含点）。个别网盘对某些后缀有问题（比如 Koofr 读不出 .bin），遇到收不到时换一个，再点“测试网盘”确认。" +
+                    "只影响本机发送；收件时不看这个设置，自动认任何后缀，两台手机可以不一样。"
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("dat", "tmp", "enc", "msg", "hl", "txt").forEach { x ->
+                    FilterChip(selected = headExt == x, onClick = { headExt = x }, label = { Text(".$x") })
+                }
+            }
+            Field("自定义后缀（1～8 位小写字母或数字，默认 dat）", headExt) {
+                headExt = it.lowercase().filter { c -> c in 'a'..'z' || c in '0'..'9' }.take(8)
+            }
+            if (headExt.isNotEmpty() && !Relay.headExtOk(headExt)) {
+                Text("这个后缀不能用（prt 是分段文件专用的），保存时会改回 dat", fontSize = 12.sp, color = Color(0xFFE5484D))
+            }
             SubTitle("传输速度")
             Field("并行数（大文件同时传 / 收几段，1～8，默认 3）", parText) { parText = it.filter { c -> c.isDigit() }.take(1) }
             NoteText("并行数越大越能叠加速度，但请求次数也烧得更快；坚果云没有公开并发上限，超出请求次数会被临时封号数小时。建议 3～4。")
