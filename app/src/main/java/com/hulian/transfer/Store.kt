@@ -220,7 +220,7 @@ object Store {
                 uri = o.optString("uri"), pkg = o.optString("pkg"), ver = o.optString("ver"), error = err,
                 read = o.optBoolean("rd", true)
             )
-        }
+        }.filter { it.state != MsgState.OFFERED }   // 待接收的卡片不保留：重启后网盘扫描会重新生成
     } catch (e: Exception) {
         badFile(msgFile, e, "聊天记录")
         emptyList()
