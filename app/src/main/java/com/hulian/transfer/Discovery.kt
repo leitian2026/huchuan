@@ -68,6 +68,9 @@ class Discovery(ctx: Context) {
         beacon.start()
     }
 
+    /** 按当前状态申请 / 释放广播用的组播锁（界面在前台或正在广播时才持有，其余时间放掉省电） */
+    fun refreshLock() = beacon.refreshLock()
+
     @Synchronized
     fun stop() {
         beacon.stop()
@@ -142,10 +145,6 @@ class Beacon(private val ctx: Context) {
     @Synchronized
     fun start() {
         stop()
-        try {
-            val wm = ctx.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            lock = wm.createMulticastLock("hulian").apply { setReferenceCounted(false); acquire() }
-        } catch (e: Exception) { Hub.log("Discovery", e) }
         val s = try {
             DatagramSocket(null).apply {
                 reuseAddress = true
@@ -159,6 +158,22 @@ class Beacon(private val ctx: Context) {
         sock = s
         jobs.add(Hub.scope.launch { receiveLoop(s) })
         burst(s)
+        refreshLock()
+    }
+
+    /** 组播锁：持有期间 Wi-Fi 芯片收不到就唤醒 CPU 的广播 / 组播包会变多，很费电，所以只在需要时持有 */
+    @Synchronized
+    fun refreshLock() {
+        val want = sock != null && (Hub.appVisible || burstJob?.isActive == true)
+        try {
+            if (want && lock == null) {
+                val wm = ctx.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                lock = wm.createMulticastLock("hulian").apply { setReferenceCounted(false); acquire() }
+            } else if (!want && lock != null) {
+                lock?.release()
+                lock = null
+            }
+        } catch (e: Exception) { Hub.log("Discovery", e) }
     }
 
     /** 广播几次：0、1、2、4、8 秒各一次；所有已配对设备都在线就提前停 */
@@ -174,6 +189,7 @@ class Beacon(private val ctx: Context) {
                 sendAll(s, reply = false)
             }
         }
+        burstJob?.invokeOnCompletion { refreshLock() }   // 广播结束后，界面不在前台就放掉组播锁
         jobs.add(burstJob!!)
     }
 
