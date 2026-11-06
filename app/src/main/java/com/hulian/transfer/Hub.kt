@@ -422,6 +422,10 @@ object Hub {
         persistSoon()
     }
 
+    fun removeMsg(id: String) {
+        _msgs.update { l -> l.filter { it.id != id } }
+    }
+
     fun patch(id: String, f: (Msg) -> Msg) {
         touch()
         var terminal = false
