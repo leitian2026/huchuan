@@ -106,6 +106,15 @@ object Store {
     var relayDoneMids: List<String>
         get() = (prefs.getString("rDone", "") ?: "").split('\n').filter { it.isNotEmpty() }
         set(v) { prefs.edit().putString("rDone", v.joinToString("\n")).apply() }
+    /** 远程发出的文件：消息编号（网盘上的）→ 聊天里那条消息的 id。对方回“收完了 / 拒绝了 / 过期了”时靠它找到消息，重启后也在 */
+    var relaySent: Map<String, String>
+        get() = LinkedHashMap<String, String>().also { m ->
+            (prefs.getString("rSent", "") ?: "").split('\n').forEach { l ->
+                val i = l.indexOf('=')
+                if (i > 0) m[l.substring(0, i)] = l.substring(i + 1)
+            }
+        }
+        set(v) { prefs.edit().putString("rSent", v.entries.joinToString("\n") { it.key + "=" + it.value }).apply() }
     /** 是否启用自建 DoH（只用于网盘，默认关）。关闭时填的地址保留但不使用，没有映射的域名直接走系统 DNS */
     var dohOn: Boolean
         get() = prefs.getBoolean("dnsDohOn", false)
