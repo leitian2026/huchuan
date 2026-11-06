@@ -22,6 +22,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         Hub.appVisible = true
         Hub.discovery?.refreshLock()   // 界面在前台：持有组播锁，能收到局域网广播
+        Relay.onForeground()           // 远程中转没连上就马上重连，不等退避
         // 从 root 管理器授权回来：重新检测一次，授权了标签就消失
         if (Root.consumeRecheck()) Root.refresh(force = true)
         // 回到前台时，正在看的聊天里在后台期间收到的消息算已读，并清掉对应通知
