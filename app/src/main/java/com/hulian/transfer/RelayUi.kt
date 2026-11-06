@@ -334,7 +334,7 @@ private fun RelaySettingsCardBody() {
             ActionBtn("测试中转", enabled = !busy) { test("测试 Cloudflare 失败", "Cloudflare 可用，口令正确") { Relay.testWorker() } }
             ActionBtn("测试网盘", enabled = !busy) {
                 val n = Store.davName
-                test("测试${n}失败", "${n}可用（能建文件夹、上传、下载、删除）") {
+                test("测试${n}失败", "${n}可用（根文件夹和子文件夹里都能上传、下载、删除，换新连接也能读）") {
                     WebDav.test(Store.dav ?: throw java.io.IOException("${Store.davName}的地址、账号、密码没有填全"))
                 }
             }
