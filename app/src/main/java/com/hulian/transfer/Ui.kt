@@ -517,7 +517,15 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     }
     val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
     val ls = rememberLazyListState()
-    LaunchedEffect(list.size) { if (list.isNotEmpty()) ls.scrollToItem(list.size - 1) }
+    // 新消息来了：本来就停在最底部（或是自己发的、第一次进来）才滚到底；正在往上翻历史时不抢走位置
+    var firstScroll by remember { mutableStateOf(true) }
+    LaunchedEffect(list.size) {
+        if (list.isEmpty()) return@LaunchedEffect
+        val li = ls.layoutInfo
+        val wasAtBottom = li.totalItemsCount == 0 || (li.visibleItemsInfo.lastOrNull()?.index ?: 0) >= li.totalItemsCount - 1
+        if (firstScroll || wasAtBottom || list.last().outgoing) ls.scrollToItem(list.size - 1)
+        firstScroll = false
+    }
 
     // 打开聊天即视为已读；聊天开着时收到的新消息也直接算已读
     DisposableEffect(peerId) {
@@ -895,6 +903,9 @@ fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
             Box(Modifier.clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick, onLongClick = { menu = true })) {
                 ChatImage(m, onFail = onFail)
             }
+            if (m.state == MsgState.WAITING) {
+                Text("等待对方接收", fontSize = 12.sp, color = Gray, modifier = Modifier.padding(top = 2.dp))
+            }
             if (m.state == MsgState.SENDING || m.state == MsgState.PAUSED) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -955,6 +966,7 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
         MsgState.FAILED -> if (m.error.isNotEmpty()) "失败：${m.error}" else "失败"
         MsgState.OFFERED -> "待接收"
+        MsgState.WAITING -> "等待对方接收"
     }
     val isApk = (m.file.ifEmpty { m.name }).let { it.endsWith(".apk", true) || it.endsWith(".apks", true) }
     val badge = if (m.kind == Kind.APP || isApk) "APK" else m.name.substringAfterLast('.', "FILE").take(4).uppercase()
@@ -980,6 +992,11 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TransferButtons(m) }
+            }
+            // 接收失败、网盘上的文件还在：直接重试，不用对方重发
+            if (!m.outgoing && m.state == MsgState.FAILED && Relay.canRetryReceive(m.id)) {
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { Relay.retryReceive(m.id) }, modifier = Modifier.fillMaxWidth()) { Text("重试接收") }
             }
             // 远程发来的文件不自动下载：点“接收”才开始，“拒绝”会清掉网盘上的文件并通知对方
             if (m.state == MsgState.OFFERED) {
