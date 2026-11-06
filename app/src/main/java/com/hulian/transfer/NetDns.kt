@@ -1,5 +1,6 @@
 package com.hulian.transfer
 
+import kotlinx.coroutines.launch
 import okhttp3.Dns
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -125,8 +126,11 @@ object NetDns {
         cache.clear()
         dohCache = null
         hostsCache = null
-        try { Http.client.connectionPool.evictAll() } catch (e: Exception) { Hub.log("NetDns", e) }
-        try { Http.dav.connectionPool.evictAll() } catch (e: Exception) { Hub.log("NetDns", e) }
+        // 关闭旧连接要做网络收尾，不能在主线程做（保存设置是在主线程调用的，以前这里会抛 NetworkOnMainThreadException，旧连接没关掉）
+        Hub.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try { Http.client.connectionPool.evictAll() } catch (e: Exception) { Hub.log("NetDns", e) }
+            try { Http.dav.connectionPool.evictAll() } catch (e: Exception) { Hub.log("NetDns", e) }
+        }
     }
 
     /** 设置页“测试解析”用：返回结果和来源，失败抛 UnknownHostException */
