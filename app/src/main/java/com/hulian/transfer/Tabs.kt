@@ -389,6 +389,22 @@ fun SettingsContent() {
         }
         SettingsCard {
             CardTitle(
+                "设备 ID",
+                help = "每台设备有一个固定的 ID，远程中转时网盘里的文件夹就是用它命名的：对方发给本机的消息放在“本机”这个文件夹里，" +
+                    "本机发给对方的消息放在对方的文件夹里。排查网盘里的文件在哪个文件夹时对照这里。长按 ID 可以复制。"
+            )
+            val pairedPeers by Hub.peers.collectAsState()
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("本机：${Store.deviceId}", fontSize = 14.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    pairedPeers.values.filter { it.fp.isNotEmpty() }.forEach {
+                        Text("${it.name}：${it.id}", fontSize = 14.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
+                }
+            }
+        }
+        SettingsCard {
+            CardTitle(
                 "接收文件保存位置",
                 help = "选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。"
             )
