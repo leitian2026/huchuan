@@ -350,9 +350,9 @@ object WebDav {
         return all
     }
 
-    /** 列出 sub 文件夹里的 .bin 文件名；文件夹不存在返回空 */
+    /** 列出 sub 文件夹里的消息头文件名（.dat，兼容旧版本的 .bin）；文件夹不存在返回空 */
     fun listBins(c: DavConfig, sub: String): List<String> {
-        if (c.s3) return listS3(c, sub).map { it.name }.filter { it.endsWith(".bin") }
+        if (c.s3) return listS3(c, sub).map { it.name }.filter { it.endsWith(".dat") || it.endsWith(".bin") }
         val req = builder(c, url(c, sub)).header("Depth", "1")
             .method("PROPFIND", PROPFIND_BODY.toRequestBody(xml)).build()
         checkNotBlocked("查看文件夹")
@@ -363,7 +363,7 @@ object WebDav {
             val text = r.body!!.string()
             Regex("<(?:\\w+:)?href>\\s*([^<]+?)\\s*</(?:\\w+:)?href>", RegexOption.IGNORE_CASE).findAll(text)
                 .map { URLDecoder.decode(it.groupValues[1].trimEnd('/'), "UTF-8").substringAfterLast('/') }
-                .filter { it.endsWith(".bin") }
+                .filter { it.endsWith(".dat") || it.endsWith(".bin") }
                 .toList()
         }
     }
