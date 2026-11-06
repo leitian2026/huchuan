@@ -48,6 +48,8 @@ object Relay {
     private var job: Job? = null
     private var backoff = 2000L
     private val wake = Channel<Unit>(Channel.CONFLATED)
+    /** 最近一次从 Cloudflare 收到任何数据的时间（心跳判断连接是否还活着） */
+    @Volatile private var lastRx = 0L
     private val acks = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val processing = ConcurrentHashMap.newKeySet<String>()
     /** 已处理过的消息 ID：存在本机，重启后还在（最多记 1500 条，再老的靠消息里的时间戳拦） */
@@ -68,13 +70,27 @@ object Relay {
     private val singleGate = Semaphore(2)
 
     /**
-     * 消息头文件（第 0 段）在网盘上的扩展名。不能用 .bin：Koofr 的 WebDAV 读 .bin 文件会回 200 和长度却一个字节都不给
-     * （实测只有 .bin 有这个问题，.tmp / .prt / .dat 等都正常）
+     * 消息头文件（第 0 段）在网盘上叫“消息编号.后缀”，后缀由发送方在设置里选（默认 dat）；分段文件固定是“消息编号-序号.prt”。
+     * 收件时不看本机的设置，认任何合法后缀。消息编号必须是 UUID，免得把文件夹里别的文件当成消息
      */
-    private const val HEAD_EXT = ".dat"
-    /** 旧版本用的扩展名：收件时仍然认，免得旧版本留在网盘里的消息被漏掉 */
-    private const val OLD_HEAD_EXT = ".bin"
-    private fun isHead(name: String) = name.endsWith(HEAD_EXT) || name.endsWith(OLD_HEAD_EXT)
+    private val uuidPattern = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+    private val headExtPattern = Regex("[a-z0-9]{1,8}")
+    /** 后缀合法：1～8 位小写字母或数字，且不能是分段文件用的 prt */
+    fun headExtOk(x: String) = headExtPattern.matches(x) && x != "prt"
+    /** 文件名是消息头文件就返回（消息编号, 后缀），否则 null */
+    private fun headOf(name: String): Pair<String, String>? {
+        val i = name.indexOf('.')
+        if (i <= 0 || name.indexOf('.', i + 1) >= 0) return null
+        val mid = name.substring(0, i)
+        val ext = name.substring(i + 1)
+        return if (uuidPattern.matches(mid) && headExtOk(ext)) mid to ext else null
+    }
+    /** 没有后缀信息时（旧版本的发件人、没带后缀的通知）依次试这两个：新版默认的 dat，旧版本用的 bin */
+    private val defaultHeadExts = listOf(".dat", ".bin")
+
+    /** 等一段上传出来的过程中，隔多久去网盘看一眼（通知可能丢了；不是放弃的时间） */
+    private const val PART_POLL_MS = 30_000L
+    private val sweeping = AtomicBoolean(false)
 
     /** 孤儿分段（对应的消息头文件不在了）至少放了这么久才删，免得误删正在上传的 */
     private const val ORPHAN_MIN_AGE_MS = 30L * 60 * 1000
@@ -95,6 +111,8 @@ object Relay {
         @Volatile var pausedSince = 0L
         /** 这条消息是谁发来的（收完后把本机的用量告诉它） */
         @Volatile var peerId: String? = null
+        /** 这条消息分几段（收到消息头后才知道；取消时要按它清理网盘上的分段） */
+        @Volatile var parts = 1
         fun poke() = tick.update { it + 1 }
     }
 
@@ -189,8 +207,10 @@ object Relay {
         } catch (e: Exception) { Hub.log("Relay", e) }
     }
 
-    /** 网络变了：别等退避时间，马上重连 */
+    /** 网络变了：旧 socket 多半已经不通了，直接丢掉并马上重连（不等退避和心跳超时） */
     fun kick() {
+        backoff = 2000L
+        if (connected.value) try { sock?.cancel() } catch (e: Exception) { Hub.log("Relay", e) }
         wake.trySend(Unit)
     }
 
@@ -227,6 +247,7 @@ object Relay {
             Request.Builder().url(wsUrl())
                 .header("X-Relay-Secret", Store.relaySecret)
                 .header("X-Device", Store.deviceId)
+                .header("X-Ack", "1")   // 告诉 Cloudflare：本机会回执“新消息”通知，没回执的请在重连时补发
                 .build()
         } catch (e: IllegalArgumentException) {
             return@coroutineScope UrlRules.relayError(Store.relayUrl) ?: ("Cloudflare 地址格式不对：" + Store.relayUrl)
@@ -244,7 +265,10 @@ object Relay {
                 Hub.scope.launch { sweepInbox() }
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) = onText(text)
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                lastRx = now()
+                onText(text)
+            }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
@@ -260,9 +284,17 @@ object Relay {
         })
         sock = s
         val hb = launch {
+            // 只负责发现“半死连接”（切网络 / 休眠后 socket 还在但已经不通，没有任何事件会通知）：
+            // 发 ping 后一定要有任何数据回来，没有就立刻判定断线，重连成功后 onOpen 会去网盘补收
             while (isActive) {
                 delay(25_000)
+                val seen = lastRx
                 s.send("ping")
+                delay(10_000)
+                if (lastRx == seen) {
+                    closed.complete("连接已失效（发出心跳后 10 秒没有任何回应）")
+                    break
+                }
             }
         }
         try {
@@ -297,6 +329,8 @@ object Relay {
                     presence.value = true
                 }
                 "notify" -> {
+                    val n = j.optLong("n", 0L)
+                    if (n > 0) sock?.send(JSONObject().put("op", "ack").put("n", n).toString())   // 先回执再处理；重复收到的靠消息编号去重
                     val from = j.getString("from")
                     val body = j.getJSONObject("body")
                     if (body.optBoolean("bye")) {   // 对方主动下线：马上标为离线
@@ -343,7 +377,8 @@ object Relay {
                     if (!midPattern.matches(mid) || doneMids.contains(mid)) return
                     // 先登记再启动接收：紧跟在后面的分段通知不会因为接收还没开始而丢掉
                     live.computeIfAbsent(mid) { Live(from) }
-                    Hub.scope.launch { receive(from, mid) }
+                    val x = body.optString("ext")
+                    Hub.scope.launch { receive(from, mid, if (headExtOk(x)) ".$x" else null) }
                 }
                 "sent" -> acks.remove(j.optString("mid"))?.complete(j.optBoolean("online"))
                 "error" -> acks.remove(j.optString("mid"))
@@ -392,6 +427,7 @@ object Relay {
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
         val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
+        val headExt = Store.relayHeadExt
         val psz = partSize(size)
         if (open != null && size > psz) {
             sendParts(peer, header, size, open, onProgress, c, mid, psz, ctl)
@@ -410,7 +446,7 @@ object Relay {
                     try {
                         ctl?.check()
                         WebDav.ensureDir(c, peer.id)
-                        WebDav.put(c, "${peer.id}/$mid$HEAD_EXT", total, ctl) { out ->
+                        WebDav.put(c, "${peer.id}/$mid.$headExt", total, ctl) { out ->
                             val ins = open?.invoke()
                             try {
                                 RelayCrypto.encrypt(key, meta, ins, out, onProgress)
@@ -445,13 +481,13 @@ object Relay {
         try {
             ctl?.check()
         } catch (e: UserCancelException) {
-            quietDelete(c, "${peer.id}/$mid$HEAD_EXT")   // 上传完的那一刻点了取消：别把文件留在网盘里
+            quietDelete(c, "${peer.id}/$mid.$headExt")   // 上传完的那一刻点了取消：别把文件留在网盘里
             throw e
         }
         val ack = CompletableDeferred<Boolean>()
         acks[mid] = ack
         try {
-            if (!s.send(notifyMsg(peer.id, JSONObject().put("mid", mid)))) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接刚刚断开")
+            if (!s.send(notifyMsg(peer.id, JSONObject().put("mid", mid).put("ext", headExt)))) throw IOException("内容已上传到${Store.davName}，但通知没发出去：和 Cloudflare 的连接刚刚断开")
             withTimeout(15_000) { ack.await() }
         } catch (e: TimeoutCancellationException) {
             throw IOException("内容已上传到${Store.davName}，但 Cloudflare 15 秒内没有确认通知已发出", e)
@@ -473,6 +509,7 @@ object Relay {
         c: DavConfig, mid: String, psz: Long, ctl: TransferCtl?
     ) {
         val n = ((size + psz - 1) / psz).toInt()
+        val headExt = Store.relayHeadExt
         val headMeta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId).put("ts", now())
             .put("parts", n).put("psz", psz).toString().toByteArray(Charsets.UTF_8)
         val key = RelayCrypto.key(peer.rk)
@@ -533,11 +570,11 @@ object Relay {
                                     if (i >= n) break
                                     // 坚果云额度快满就在这里自动暂停（只拦新的一段，已经在传的传完）
                                     DavQuota.ensureRoom(ctl, minOf(psz, size - i * psz), 0L, 1)
-                                    uploadPart(c, peer, mid, key, headMeta, i, psz, size, open, sent, lock, onProgress, ctl)
+                                    uploadPart(c, peer, mid, key, headMeta, headExt, i, psz, size, open, sent, lock, onProgress, ctl)
                                     uploaded.add(i)
                                     if (i == 0) {
                                         headNotified.set(true)
-                                        notifyHead(peer, mid)
+                                        notifyHead(peer, mid, headExt)
                                         headSent.complete(Unit)
                                     } else {
                                         headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
@@ -563,7 +600,7 @@ object Relay {
                         Hub.log("Relay", x)
                     }
                 }
-                for (i in uploaded) quietDelete(c, "${peer.id}/" + if (i == 0) "$mid$HEAD_EXT" else "$mid-$i.prt")
+                for (i in uploaded) quietDelete(c, "${peer.id}/" + if (i == 0) "$mid.$headExt" else "$mid-$i.prt")
             }
             throw e
         } finally {
@@ -572,7 +609,7 @@ object Relay {
     }
 
     private suspend fun uploadPart(
-        c: DavConfig, peer: Peer, mid: String, key: SecretKeySpec, headMeta: ByteArray,
+        c: DavConfig, peer: Peer, mid: String, key: SecretKeySpec, headMeta: ByteArray, headExt: String,
         i: Int, psz: Long, size: Long, open: () -> InputStream,
         sent: AtomicLong, lock: Any, onProgress: (Long) -> Unit, ctl: TransferCtl?
     ) {
@@ -580,7 +617,7 @@ object Relay {
         val meta = if (i == 0) headMeta else JSONObject().put("mid", mid).put("from", Store.deviceId)
             .put("idx", i).put("len", plain).toString().toByteArray(Charsets.UTF_8)
         val total = RelayCrypto.encryptedSize(meta.size, plain)
-        val name = if (i == 0) "${peer.id}/$mid$HEAD_EXT" else "${peer.id}/$mid-$i.prt"
+        val name = if (i == 0) "${peer.id}/$mid.$headExt" else "${peer.id}/$mid-$i.prt"
         var attempt = 0
         while (true) {
             var last = 0L
@@ -650,11 +687,11 @@ object Relay {
     }
 
     /** 第 0 段传完后的通知：和单文件一样，等 Cloudflare 确认 */
-    private suspend fun notifyHead(peer: Peer, mid: String) {
+    private suspend fun notifyHead(peer: Peer, mid: String, headExt: String) {
         val ack = CompletableDeferred<Boolean>()
         acks[mid] = ack
         try {
-            sendNotify(peer.id, JSONObject().put("mid", mid))
+            sendNotify(peer.id, JSONObject().put("mid", mid).put("ext", headExt))
             withTimeout(15_000) { ack.await() }
         } catch (e: TimeoutCancellationException) {
             throw IOException("内容已上传到${Store.davName}，但 Cloudflare 15 秒内没有确认通知已发出", e)
@@ -705,16 +742,16 @@ object Relay {
 
     /** 连上 Cloudflare 后，把坚果云里留给本机的内容都收一遍（对方发的时候本机可能不在线） */
     private suspend fun sweepInbox() = withContext(Dispatchers.IO) {
+        if (!sweeping.compareAndSet(false, true)) return@withContext   // 已经有一次在扫了
         try {
             val c = Store.dav ?: return@withContext
             val entries = WebDav.listEntries(c, Store.deviceId)
-            for (e in entries) if (isHead(e.name)) {
-                val x = if (e.name.endsWith(HEAD_EXT)) HEAD_EXT else OLD_HEAD_EXT
-                receive(null, e.name.removeSuffix(x), x)
-            }
+            for (e in entries) headOf(e.name)?.let { (m, x) -> receive(null, m, ".$x") }
             cleanupRemnants(c, entries, ORPHAN_MIN_AGE_MS)   // 收完了顺手把残留清掉（用的是同一份列表，不多发请求）
         } catch (e: Exception) {
             Hub.reportOnce("relay-sweep", "检查${Store.davName}里的未收消息失败", friendlyError(e), techDetail(e))
+        } finally {
+            sweeping.set(false)
         }
     }
 
@@ -728,8 +765,8 @@ object Relay {
         if (!processing.add(mid)) return@withContext
         val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         var multi: Multi? = null
-        // 知道扩展名（扫描网盘时）就直接用；不知道（收到通知时）先试新的 .dat，找不到再试旧版本的 .bin
-        val exts = if (ext != null) listOf(ext) else listOf(HEAD_EXT, OLD_HEAD_EXT)
+        // 知道后缀（扫描网盘时、或通知里带了）先试它，找不到（404）再依次试 .dat、.bin（旧版本的发件人没有后缀信息）
+        val exts = (listOfNotNull(ext) + defaultHeadExts).distinct()
         var extIdx = 0
         var path = "${Store.deviceId}/$mid${exts[0]}"
         try {
@@ -817,6 +854,20 @@ object Relay {
                         Hub.log("Relay", x)
                     }
                 }
+            } else {
+                // 第 0 段还没收完就点了取消：用消息头里记下的分段数和发送者来清理、通知
+                Store.dav?.let { d ->
+                    if (lv.parts > 1) deleteParts(d, mid, lv.parts)
+                    quietDelete(d, path)
+                }
+                val pid = lv.peerId
+                if (pid != null && pid in online.value) {
+                    try {
+                        sendNotify(pid, JSONObject().put("mid", mid).put("cancel", true))
+                    } catch (x: Exception) {
+                        Hub.log("Relay", x)
+                    }
+                }
             }
         } catch (e: PeerGoneException) {
             markDone(mid)
@@ -868,17 +919,21 @@ object Relay {
                 Inbox.addText(peer.id, text)
                 null
             }
-            "file" -> receiveFile(mid, peer, keys[idx], meta, reader)
+            "file" -> receiveFile(mid, peer, keys[idx], meta, reader, lv)
             else -> throw IOException("不支持的消息类型：$type")
         }
     }
 
     /** 单文件收完返回 null；分段文件只收完第 0 段，返回还要继续收的状态 */
-    private fun receiveFile(mid: String, peer: Peer, key: SecretKeySpec, meta: JSONObject, reader: RelayCrypto.Reader): Multi? {
+    private fun receiveFile(mid: String, peer: Peer, key: SecretKeySpec, meta: JSONObject, reader: RelayCrypto.Reader, lv: Live): Multi? {
         val job = Inbox.beginFile(peer.id, meta)
+        // 聊天里一出现这条消息就有控制柄：取消按钮马上能点（暂停要等确认是分段文件后才开放）
+        val ctl = Transfers.begin(job.id)
+        var handedOver = false
         try {
             val parts = meta.optInt("parts", 1)
             val psz = meta.optLong("psz", 0L)
+            lv.parts = parts
             if (parts > 1) {
                 if (meta.optString("mid") != mid) throw IOException("消息编号校验失败：文件名和消息里的编号对不上")
                 if (psz < RelayCrypto.CHUNK || psz > MAX_PART || parts.toLong() != (job.size + psz - 1) / psz) {
@@ -890,6 +945,7 @@ object Relay {
             var last = 0L
             val os = job.saved.stream
             while (got < want) {
+                ctl.check()   // 点了取消就停
                 val f = reader.next()
                     ?: throw IOException("远程文件不完整：中途就结束了（已收到 ${fmtSize(got)} / ${fmtSize(job.size)}）")
                 if (got + f.size > want) throw IOException("数据与声明的大小不符")
@@ -902,8 +958,8 @@ object Relay {
                 }
             }
             if (parts > 1) {
-                val ctl = Transfers.begin(job.id)
                 ctl.canPause = true
+                handedOver = true   // 控制柄交给后面收各段的流程，由它结束
                 return Multi(peer, key, mid, job, parts, psz, ctl).also { it.got = got }
             }
             os.close()
@@ -911,8 +967,14 @@ object Relay {
             return null
         } catch (e: Exception) {
             try { job.saved.stream.close() } catch (x: Exception) { Hub.log("Relay", x) }
+            if (ctl.cancelled) {
+                Inbox.cancelFile(job)
+                throw UserCancelException()
+            }
             Inbox.failFile(job, e)
             throw e
+        } finally {
+            if (!handedOver) Transfers.end(job.id, ctl)
         }
     }
 
@@ -968,15 +1030,21 @@ object Relay {
         } catch (e: WebDav.DavException) {
             if (e.code == 404) null else throw e
         }
+        var waitStart = now()   // 从什么时候开始一直没有新动静（放弃的时间从这里算）
         while (true) {
             m.ctl.gate()
             if (lv.aborted) throw PeerGoneException("对方中止了发送（发送方出错或取消了）", true, m.n)
             val seen = lv.tick.value   // 先记下，再去看：看的时候来的通知不会漏掉
             if (lv.optimistic || i in lv.announced) tryGet()?.let { return it }
-            if (withTimeoutOrNull(PART_WAIT_MS) { lv.tick.first { it != seen } } == null) {
-                if (m.ctl.paused) continue   // 本机暂停中：不算对方超时，继续后再等
-                if (lv.senderPaused && now() - lv.pausedSince < SENDER_PAUSE_MAX_MS) continue   // 对方暂停了
-                tryGet()?.let { return it }
+            // 每隔 PART_POLL_MS 就去网盘看一眼（通知可能丢了），而不是干等到放弃的时间
+            if (withTimeoutOrNull(PART_POLL_MS) { lv.tick.first { it != seen } } != null) {
+                waitStart = now()
+                continue
+            }
+            if (m.ctl.paused) { waitStart = now(); continue }   // 本机暂停中：不算对方超时，继续后再等
+            if (lv.senderPaused && now() - lv.pausedSince < SENDER_PAUSE_MAX_MS) { waitStart = now(); continue }   // 对方暂停了
+            tryGet()?.let { return it }
+            if (now() - waitStart >= PART_WAIT_MS) {
                 val why = if (lv.senderPaused) "对方暂停发送后超过 ${SENDER_PAUSE_MAX_MS / 60000} 分钟没有继续" else "对方 ${PART_WAIT_MS / 1000} 秒没有继续上传"
                 throw PeerGoneException("$why（第 ${i + 1} / ${m.n} 段）", false, m.n)
             }
@@ -1016,13 +1084,9 @@ object Relay {
      */
     private suspend fun cleanupRemnants(c: DavConfig, entries: List<WebDav.Entry>, minAgeMs: Long): Pair<Int, Long> {
         val now = System.currentTimeMillis()
-        fun midOf(name: String): String? = when {
-            name.endsWith(HEAD_EXT) -> name.removeSuffix(HEAD_EXT)
-            name.endsWith(OLD_HEAD_EXT) -> name.removeSuffix(OLD_HEAD_EXT)
-            name.endsWith(".prt") -> name.removeSuffix(".prt").substringBeforeLast('-', "")   // 消息编号本身带 '-'，最后一个 '-' 后面才是第几段
-            else -> null
-        }?.takeIf { midPattern.matches(it) }
-        val heads = entries.filter { isHead(it.name) }.mapNotNull { midOf(it.name) }.toSet()
+        fun midOf(name: String): String? = headOf(name)?.first
+            ?: if (name.endsWith(".prt")) name.removeSuffix(".prt").substringBeforeLast('-', "").takeIf { uuidPattern.matches(it) } else null   // 消息编号本身带 '-'，最后一个 '-' 后面才是第几段
+        val heads = entries.mapNotNull { headOf(it.name)?.first }.toSet()
         var n = 0
         var bytes = 0L
         for (e in entries) {
