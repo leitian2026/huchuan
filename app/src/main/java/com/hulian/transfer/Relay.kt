@@ -749,7 +749,7 @@ object Relay {
             while (true) {
                 try {
                     try {
-                        WebDav.get(c, path, fresh = cuts > 0) { ins ->   // 重试时用全新连接
+                        WebDav.get(c, path) { ins ->
                             val cin = CountingInputStream(ins)
                             multi = handleStream(mid, peers, cin, lv)
                             DavQuota.addDown(cin.count)
