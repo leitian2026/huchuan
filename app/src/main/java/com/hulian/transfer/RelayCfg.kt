@@ -18,7 +18,7 @@ object RelayCfg {
     fun export(): JSONObject = JSONObject()
         .put("u", Store.relayUrl).put("s", Store.relaySecret)
         .put("dv", Store.davProvider).put("du", Store.davUrl).put("dn", Store.davUser)
-        .put("dp", Store.davPass).put("dd", Store.davDir)
+        .put("dp", Store.davPass).put("dd", Store.davDir).put("he", Store.relayHeadExt)
         .put("hs", Store.hostsText).put("ho", Store.hostsOn)
         .put("dh", Store.dohUrl).put("do", Store.dohOn)
         .put("cs", Store.cfSysDns).put("ds", Store.davSysDns)
@@ -40,6 +40,7 @@ object RelayCfg {
             Store.davUser = j.optString("dn").trim()
             Store.davPass = j.optString("dp").trim()
             Store.davDir = j.optString("dd").trim().trim('/').ifEmpty { "hulian-relay" }
+            j.optString("he").takeIf { Relay.headExtOk(it) }?.let { Store.relayHeadExt = it }
         }
         // 域名解析：格式不对的整项跳过，不影响其他设置
         val hs = j.optString("hs").trim()
