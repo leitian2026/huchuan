@@ -247,12 +247,25 @@ object WebDav {
         call(req, "上传").close()
     }
 
-    private fun getReq(c: DavConfig, sub: String, tag: Any?): Request =
+    private fun getReq(c: DavConfig, sub: String, tag: Any?, fresh: Boolean = false): Request =
         if (c.s3) S3.request(c, "GET", S3.objUrl(c, sub), null, tag)
-        else builder(c, url(c, sub)).get().tag(tag).build()
+        else builder(c, url(c, sub)).get().tag(tag).apply { if (fresh) header("Connection", "close") }.build()
 
-    fun <T> get(c: DavConfig, sub: String, tag: Any? = null, block: (InputStream) -> T): T {
-        return call(getReq(c, sub, tag), "下载").use { r ->
+    /** 服务器响应里排查用得上的几项，写进“下载中途断开”的报错里 */
+    private fun respInfo(r: Response): String {
+        val h = r.headers
+        val keys = listOf("Content-Length", "Content-Encoding", "Transfer-Encoding", "Content-Type", "Connection", "Server")
+        val parts = keys.mapNotNull { k -> h[k]?.let { "$k: $it" } }
+        return "HTTP ${r.code} ${r.protocol}" + if (parts.isEmpty()) "" else "；" + parts.joinToString("；")
+    }
+
+    /**
+     * fresh=true：先清掉连接池里的旧连接，并让服务器回完就关连接（Connection: close），用一条全新的连接下载。
+     * 下载被中途断开后重试时用，排除“复用了一条已经半断开的旧连接”这种情况
+     */
+    fun <T> get(c: DavConfig, sub: String, tag: Any? = null, fresh: Boolean = false, block: (InputStream) -> T): T {
+        if (fresh) Http.dav.connectionPool.evictAll()
+        return call(getReq(c, sub, tag, fresh), "下载").use { r ->
             val total = r.body!!.contentLength()   // 服务器声明的大小，-1 表示没给
             val cin = CountingInputStream(r.body!!.byteStream())
             try {
@@ -263,7 +276,8 @@ object WebDav {
                 val declared = if (total >= 0L) "${fmtSize(total)}（$total 字节）" else "没有声明"
                 throw StreamCutException(
                     "${Store.davName}下载时连接被中途断开，内容没收完整：已收到 ${fmtSize(cin.count)}（${cin.count} 字节），服务器声明共 $declared。" +
-                        "常见原因：对方刚传完、网盘那边还没写好，或网络不稳；一般过几秒再收就好",
+                        "常见原因：对方刚传完、网盘那边还没写好，或网络不稳；一般过几秒再收就好。" +
+                        "服务器响应：${respInfo(r)}${if (fresh) "；这次是用全新连接下载的" else ""}",
                     e
                 )
             }
