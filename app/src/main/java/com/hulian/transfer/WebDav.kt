@@ -373,21 +373,17 @@ object WebDav {
 
     /**
      * 测试网盘：每一组条件各传一个文件再读回来，互相独立，一组失败不影响后面的。
-     * 条件一次只变一个（文件夹 / 扩展名 / 大小 / 内容），全部跑完列出每组的结果，失败的话就能看出是哪个条件触发的
+     * 现在每组都是“子文件夹里 150 字节随机内容”，只换扩展名，全部跑完列出每个后缀是否能正常读回来
      */
     fun test(c: DavConfig) {
         forgetDirs()
         ensureDir(c)
         val tag = newId().take(8)
         val dir = "_selftest"
-        val cases = listOf(
-            TestCase("根文件夹 · .tmp · 6 字节文本（基准）", "", "tmp", 6, false),
-            TestCase("根文件夹 · .tmp · 150 字节随机内容", "", "tmp", 150, true),
-            TestCase("根文件夹 · .bin · 6 字节文本", "", "bin", 6, false),
-            TestCase("子文件夹 · .tmp · 6 字节文本", dir, "tmp", 6, false),
-            TestCase("根文件夹 · .tmp · 150 字节文本", "", "tmp", 150, false),
-            TestCase("子文件夹 · .bin · 150 字节随机内容（和真实消息一样）", dir, "bin", 150, true),
-        )
+        // 每组都是 150 字节随机内容，只换扩展名：找出哪些后缀这个网盘能正常读回来
+        val cases = listOf("tmp", "bin", "prt", "dat", "enc", "msg", "hl", "txt").map {
+            TestCase("扩展名 .$it", dir, it, 150, true)
+        }
         val rnd = java.security.SecureRandom()
         val lines = StringBuilder()
         var failed = 0
