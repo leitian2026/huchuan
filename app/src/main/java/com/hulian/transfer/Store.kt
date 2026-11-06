@@ -187,11 +187,11 @@ object Store {
     private val msgFile get() = File(ctx.filesDir, "msgs.json")
     private val peerFile get() = File(ctx.filesDir, "peers.json")
 
-    @Synchronized
     /** 每条消息序列化后的文本（消息内容没变就直接复用）。聊天记录有几千条时，不用每次保存都整个重新序列化 */
     private val msgJson = java.util.WeakHashMap<Msg, String>()
     private var lastMsgsText: String? = null
 
+    @Synchronized
     fun saveMsgs(list: List<Msg>) {
         val parts = synchronized(msgJson) {
             list.takeLast(3000).map { m ->
@@ -235,11 +235,11 @@ object Store {
         emptyList()
     }
 
-    @Synchronized
     /** 每个密钥加密后的文本：加密每次结果都不同，不缓存的话每次保存的内容都会“变”，没法判断有没有变化 */
     private val rkEnc = HashMap<String, String>()
     private var lastPeersText: String? = null
 
+    @Synchronized
     fun savePeers(map: Map<String, Peer>) {
         val arr = JSONArray()
         map.values.forEach { p ->
