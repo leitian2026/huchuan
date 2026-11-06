@@ -954,6 +954,7 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
         MsgState.CANCELED -> "已取消"
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
         MsgState.FAILED -> "失败"
+        MsgState.OFFERED -> "待接收"
     }
     val isApk = (m.file.ifEmpty { m.name }).let { it.endsWith(".apk", true) || it.endsWith(".apks", true) }
     val badge = if (m.kind == Kind.APP || isApk) "APK" else m.name.substringAfterLast('.', "FILE").take(4).uppercase()
@@ -979,6 +980,16 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(progress = { pct }, modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TransferButtons(m) }
+            }
+            // 远程发来的文件不自动下载：点“接收”才开始，“拒绝”会清掉网盘上的文件并通知对方
+            if (m.state == MsgState.OFFERED) {
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { Relay.rejectOffer(m.id) }, modifier = Modifier.weight(1f)) {
+                        Text("拒绝", color = Color(0xFFE5484D))
+                    }
+                    Button(onClick = { Relay.acceptOffer(m.id) }, modifier = Modifier.weight(1f)) { Text("接收") }
+                }
             }
         }
     }
