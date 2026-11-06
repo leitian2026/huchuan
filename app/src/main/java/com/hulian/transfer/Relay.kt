@@ -57,6 +57,21 @@ object Relay {
     private val offers = ConcurrentHashMap<String, Offer>()
     /** 用户点了“接收”的消息编号：receive 再跑到消息头时放行 */
     private val accepted = ConcurrentHashMap.newKeySet<String>()
+    /** 点了“接收”的消息是从哪台设备来的（接收没能开始时，用它在对应聊天里留一条失败消息） */
+    private val acceptPeer = ConcurrentHashMap<String, String>()
+
+    /**
+     * 用户点了“接收”之后，接收流程没开始就退出（网盘上找不到文件、已处理过等）：在聊天里留一条写明原因的失败消息，
+     * 同时记入错误记录，不能让卡片无声无息地消失。没点过“接收”的（自动扫描）不提示
+     */
+    private fun failVisible(mid: String, reason: String) {
+        if (!accepted.remove(mid)) return
+        val pid = acceptPeer.remove(mid)
+        Hub.report("远程接收失败", IOException(reason), "消息：$mid")
+        if (pid != null) {
+            Hub.addMsg(Msg(newId(), pid, false, Kind.FILE, now(), name = "远程文件", state = MsgState.FAILED, error = reason))
+        }
+    }
     /** 消息头读到文件但还没被接受：中断这次下载，改成放一张待接收的卡片 */
     private class OfferException(val peer: Peer, val meta: JSONObject) : IOException("等待用户接收")
     /** 已处理过的消息 ID：存在本机，重启后还在（最多记 1500 条，再老的靠消息里的时间戳拦） */
@@ -766,11 +781,15 @@ object Relay {
     private suspend fun receive(fromHint: String?, mid: String, ext: String? = null) = withContext(Dispatchers.IO) {
         if (!midPattern.matches(mid)) return@withContext
         if (doneMids.contains(mid)) {
+            failVisible(mid, "这条消息已经处理过（收完、拒绝或失败过），本机不会再收一次，请让对方重新发送")
             live.remove(mid)
             return@withContext
         }
         if (offers.containsKey(mid)) return@withContext   // 已经有张待接收的卡片了，等用户决定
-        if (!processing.add(mid)) return@withContext
+        if (!processing.add(mid)) {
+            failVisible(mid, "这条消息正在处理中，请稍后再点接收")
+            return@withContext
+        }
         val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         var multi: Multi? = null
         // 知道后缀（扫描网盘时、或通知里带了）先试它，找不到（404）再依次试 .dat、.bin（旧版本的发件人没有后缀信息）
@@ -784,6 +803,7 @@ object Relay {
             }
             if (peers.isEmpty()) {
                 Hub.log("远程中转", IOException("收到来自 ${fromHint ?: "未知设备"} 的内容，但没有对应的已配对设备或加密密钥，已忽略"))
+                failVisible(mid, "没有对应的已配对设备或加密密钥，无法接收")
                 markDone(mid)
                 return@withContext
             }
@@ -806,6 +826,7 @@ object Relay {
                                 path = "${Store.deviceId}/$mid${exts[extIdx]}"
                                 continue
                             }
+                            failVisible(mid, "${Store.davName}上找不到这个文件（可能对方已取消、已被删除，或还没传完）")
                             markDone(mid) // 已经收过并删除了
                             return@withContext
                         }
@@ -919,8 +940,9 @@ object Relay {
         }
         Hub.removeMsg(mid)   // 待接收的卡片换成正式的接收消息（Inbox.beginFile 创建）
         accepted.add(mid)
+        acceptPeer[mid] = o.peerId
         live.computeIfAbsent(mid) { Live(o.from) }.optimistic = true
-        Hub.scope.launch { receive(o.from, mid, ".${o.ext}".removePrefix("..")) }
+        Hub.scope.launch { receive(o.from, mid, if (o.ext.startsWith(".")) o.ext else ".${o.ext}") }
     }
 
     /** 用户点了“拒绝”：不下载，清掉网盘上的文件，告诉发送方 */
