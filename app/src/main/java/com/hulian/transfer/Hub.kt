@@ -141,6 +141,17 @@ object Hub {
 
     fun touch() { lastActivity = now() }
 
+    /** 马上把聊天记录和设备列表存盘（不等 400 毫秒的合并延迟） */
+    fun persistNow() {
+        saveJob?.cancel()
+        try {
+            Store.saveMsgs(_msgs.value)
+            Store.savePeers(_peers.value)
+        } catch (e: Exception) {
+            reportOnce("save", "聊天记录 / 设备列表保存失败", friendlyError(e), techDetail(e))
+        }
+    }
+
     private fun persistSoon() {
         saveJob?.cancel()
         saveJob = scope.launch {
