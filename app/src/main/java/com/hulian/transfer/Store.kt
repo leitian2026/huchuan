@@ -188,18 +188,27 @@ object Store {
     private val peerFile get() = File(ctx.filesDir, "peers.json")
 
     @Synchronized
+    /** 每条消息序列化后的文本（消息内容没变就直接复用）。聊天记录有几千条时，不用每次保存都整个重新序列化 */
+    private val msgJson = java.util.WeakHashMap<Msg, String>()
+    private var lastMsgsText: String? = null
+
     fun saveMsgs(list: List<Msg>) {
-        val arr = JSONArray()
-        list.takeLast(3000).forEach { m ->
-            arr.put(
-                JSONObject().put("id", m.id).put("peer", m.peerId).put("out", m.outgoing)
-                    .put("kind", m.kind.name).put("time", m.time).put("text", m.text)
-                    .put("name", m.name).put("file", m.file).put("size", m.size)
-                    .put("done", m.done).put("state", m.state.name).put("uri", m.uri)
-                    .put("pkg", m.pkg).put("ver", m.ver).put("err", m.error).put("rd", m.read)
-            )
+        val parts = synchronized(msgJson) {
+            list.takeLast(3000).map { m ->
+                msgJson.getOrPut(m) {
+                    JSONObject().put("id", m.id).put("peer", m.peerId).put("out", m.outgoing)
+                        .put("kind", m.kind.name).put("time", m.time).put("text", m.text)
+                        .put("name", m.name).put("file", m.file).put("size", m.size)
+                        .put("done", m.done).put("state", m.state.name).put("uri", m.uri)
+                        .put("pkg", m.pkg).put("ver", m.ver).put("err", m.error).put("rd", m.read)
+                        .toString()
+                }
+            }
         }
-        writeAtomic(msgFile, arr.toString())
+        val text = parts.joinToString(",", "[", "]")
+        if (text == lastMsgsText) return   // 和上次写进去的一样：不用再写盘
+        writeAtomic(msgFile, text)
+        lastMsgsText = text
     }
 
     fun loadMsgs(): List<Msg> = try {
@@ -227,6 +236,10 @@ object Store {
     }
 
     @Synchronized
+    /** 每个密钥加密后的文本：加密每次结果都不同，不缓存的话每次保存的内容都会“变”，没法判断有没有变化 */
+    private val rkEnc = HashMap<String, String>()
+    private var lastPeersText: String? = null
+
     fun savePeers(map: Map<String, Peer>) {
         val arr = JSONArray()
         map.values.forEach { p ->
@@ -234,10 +247,13 @@ object Store {
                 JSONObject().put("id", p.id).put("name", p.name).put("host", p.host)
                     .put("port", p.port).put("seen", p.lastSeen).put("fp", p.fp)
                     .also { o -> p.iHost?.let { o.put("ih", it) } }
-                    .also { o -> if (p.rk.isNotEmpty()) o.put("rk", KeyVault.encrypt(p.rk)) }
+                    .also { o -> if (p.rk.isNotEmpty()) o.put("rk", synchronized(rkEnc) { rkEnc.getOrPut(p.rk) { KeyVault.encrypt(p.rk) } }) }
             )
         }
-        writeAtomic(peerFile, arr.toString())
+        val text = arr.toString()
+        if (text == lastPeersText) return
+        writeAtomic(peerFile, text)
+        lastPeersText = text
     }
 
     fun loadPeers(): Map<String, Peer> = try {
