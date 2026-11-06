@@ -286,11 +286,18 @@ object WebDav {
     }
 
     /** 下载一个不大的文件到内存；超过 max 字节就报错（免得对方 / 服务器塞个超大文件把内存撑爆） */
-    fun getBytes(c: DavConfig, sub: String, max: Long, tag: Any? = null): ByteArray =
+    /** 整个下载进内存。onBytes 每读到一块数据就回调（字节数），用来边下边显示进度 */
+    fun getBytes(c: DavConfig, sub: String, max: Long, tag: Any? = null, onBytes: ((Long) -> Unit)? = null): ByteArray =
         call(getReq(c, sub, tag), "下载").use { r ->
             val src = r.body!!.source()
-            if (src.request(max + 1)) throw IOException("下载的文件比预期的大")
-            src.readByteArray()
+            val buf = okio.Buffer()
+            while (true) {
+                val n = src.read(buf, 65536L)
+                if (n < 0L) break
+                if (buf.size > max) throw IOException("下载的文件比预期的大")
+                onBytes?.invoke(n)
+            }
+            buf.readByteArray()
         }
 
     fun delete(c: DavConfig, sub: String) {
