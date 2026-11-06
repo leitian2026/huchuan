@@ -38,7 +38,7 @@ fun TransportSettingsCard() {
             lan = it
             Store.lanOn = it
             Hub.discovery?.restart()
-            Hub.probeKnown()
+            Hub.probeKnown(force = true)
         }
         HorizontalDivider(color = LineColor)
         SwitchRow("热点", hs, "没有共同 Wi-Fi 时用 Wi-Fi Direct / 临时热点") {
