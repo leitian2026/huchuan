@@ -80,6 +80,14 @@ object Store {
         get() = prefs.getString(dk("dDir"), "hulian-relay") ?: "hulian-relay"
         set(v) { prefs.edit().putString(dk("dDir"), v).apply() }
 
+    /**
+     * 发送时消息头文件在网盘上的扩展名（不含点），每家网盘各记一个，默认 dat。
+     * 个别网盘对某些后缀有问题（Koofr 的 WebDAV 读 .bin 会回 200 却不给内容），所以能自己选。收件时不看这个设置，自动认任何后缀
+     */
+    var relayHeadExt: String
+        get() = (prefs.getString(dk("rHeadExt"), "dat") ?: "dat").takeIf { Regex("[a-z0-9]{1,8}").matches(it) && it != "prt" } ?: "dat"
+        set(v) { prefs.edit().putString(dk("rHeadExt"), v).apply() }
+
     /** 当前网盘的配置；没填全返回 null */
     val dav: DavConfig?
         get() {
