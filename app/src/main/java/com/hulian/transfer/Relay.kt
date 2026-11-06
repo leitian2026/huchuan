@@ -52,6 +52,13 @@ object Relay {
     @Volatile private var lastRx = 0L
     private val acks = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val processing = ConcurrentHashMap.newKeySet<String>()
+    /** 等本机点“接收”的远程文件：消息编号 → 信息。点接收前不下载内容，只读了第一块（消息头）来显示文件名和大小 */
+    private class Offer(val from: String?, val peerId: String, val ext: String, val parts: Int)
+    private val offers = ConcurrentHashMap<String, Offer>()
+    /** 用户点了“接收”的消息编号：receive 再跑到消息头时放行 */
+    private val accepted = ConcurrentHashMap.newKeySet<String>()
+    /** 消息头读到文件但还没被接受：中断这次下载，改成放一张待接收的卡片 */
+    private class OfferException(val peer: Peer, val meta: JSONObject) : IOException("等待用户接收")
     /** 已处理过的消息 ID：存在本机，重启后还在（最多记 1500 条，再老的靠消息里的时间戳拦） */
     private val doneMids: MutableSet<String> by lazy { java.util.Collections.synchronizedSet(LinkedHashSet(Store.relayDoneMids)) }
     private const val DONE_MAX = 1500
@@ -762,6 +769,7 @@ object Relay {
             live.remove(mid)
             return@withContext
         }
+        if (offers.containsKey(mid)) return@withContext   // 已经有张待接收的卡片了，等用户决定
         if (!processing.add(mid)) return@withContext
         val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         var multi: Multi? = null
@@ -823,6 +831,15 @@ object Relay {
             multi?.let { deleteParts(c, mid, it.n) }
             try { WebDav.delete(c, path) } catch (e: Exception) { Hub.log("删除已收到的中转文件", e) }
             lv.peerId?.let { reportUsage(it, mid) }
+        } catch (e: OfferException) {
+            try {
+                offers[mid] = Offer(fromHint, e.peer.id, exts[extIdx], e.meta.optInt("parts", 1).coerceAtLeast(1))
+                Inbox.offerFile(e.peer.id, mid, e.meta)
+            } catch (x: Exception) {
+                offers.remove(mid)
+                markDone(mid)
+                Hub.report("远程接收失败", x, "消息：$mid")
+            }
         } catch (e: NoKeyException) {
             markDone(mid)
             if (fromHint == null) {
@@ -893,6 +910,40 @@ object Relay {
         }
     }
 
+    /** 用户点了“接收”：开始下载。分段文件的后续分段通知在等待期间被忽略了，所以直接去网盘取，不等通知 */
+    fun acceptOffer(mid: String) {
+        val o = offers.remove(mid) ?: run {
+            Hub.toast("这个文件已经失效，请让对方重新发送")
+            Hub.removeMsg(mid)
+            return
+        }
+        Hub.removeMsg(mid)   // 待接收的卡片换成正式的接收消息（Inbox.beginFile 创建）
+        accepted.add(mid)
+        live.computeIfAbsent(mid) { Live(o.from) }.optimistic = true
+        Hub.scope.launch { receive(o.from, mid, ".${o.ext}".removePrefix("..")) }
+    }
+
+    /** 用户点了“拒绝”：不下载，清掉网盘上的文件，告诉发送方 */
+    fun rejectOffer(mid: String) {
+        val o = offers.remove(mid) ?: run { Hub.removeMsg(mid); return }
+        markDone(mid)
+        Hub.patch(mid) { it.copy(state = MsgState.CANCELED, error = "已拒绝") }
+        Hub.persistNow()
+        Hub.scope.launch(Dispatchers.IO) {
+            Store.dav?.let { d ->
+                if (o.parts > 1) deleteParts(d, mid, o.parts)
+                quietDelete(d, "${Store.deviceId}/$mid${if (o.ext.startsWith(".")) o.ext else "." + o.ext}")
+            }
+            if (o.peerId in online.value) {
+                try {
+                    sendNotify(o.peerId, JSONObject().put("mid", mid).put("cancel", true))
+                } catch (x: Exception) {
+                    Hub.log("Relay", x)
+                }
+            }
+        }
+    }
+
     /** 所有候选密钥都解不开消息头（和下载中断、文件损坏这类错误区分开：那些不会走到这里） */
     private class NoKeyException(msg: String) : IOException(msg)
 
@@ -919,7 +970,10 @@ object Relay {
                 Inbox.addText(peer.id, text)
                 null
             }
-            "file" -> receiveFile(mid, peer, keys[idx], meta, reader, lv)
+            "file" -> {
+                if (!accepted.contains(mid)) throw OfferException(peer, meta)   // 文件不自动下载：等用户点“接收”
+                receiveFile(mid, peer, keys[idx], meta, reader, lv)
+            }
             else -> throw IOException("不支持的消息类型：$type")
         }
     }
