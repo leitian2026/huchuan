@@ -859,15 +859,21 @@ object Relay {
                                     DavQuota.ensureRoom(ctl, minOf(psz, size - i * psz), 0L, 1)
                                     uploadPart(c, peer, mid, key, headMeta, headExt, i, psz, size, open, sent, lock, onProgress, ctl)
                                     uploaded.add(i)
+                                    // 通知放到单独的协程里发，这条分段的“工人”马上去传下一段：
+                                    // 以前它要等第 0 段的通知被 Cloudflare 确认（最多十几秒、断线时更久），所有分段都跟着停在原地
                                     if (i == 0) {
                                         headNotified.set(true)
-                                        notifyHead(peer, mid, headExt)
-                                        headSent.complete(Unit)
+                                        launch {
+                                            notifyHead(peer, mid, headExt)
+                                            headSent.complete(Unit)
+                                        }
                                     } else {
-                                        headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
-                                        // 对方不在线就不发：Cloudflare 会把每条通知都存起来（每台设备最多 200 条），
-                                        // 几十条分段通知会挤掉别的消息；对方上线后自己扫描网盘就能收到已传好的分段
-                                        if (peer.id in online.value) sendNotify(peer.id, JSONObject().put("mid", mid).put("p", i))
+                                        launch {
+                                            headSent.await()   // 对方先收到第 0 段的通知，再收到后面各段的
+                                            // 对方不在线就不发：Cloudflare 会把每条通知都存起来（每台设备最多 200 条），
+                                            // 几十条分段通知会挤掉别的消息；对方上线后自己扫描网盘就能收到已传好的分段
+                                            if (peer.id in online.value) sendNotify(peer.id, JSONObject().put("mid", mid).put("p", i))
+                                        }
                                     }
                                 }
                             }
@@ -906,10 +912,12 @@ object Relay {
         val total = RelayCrypto.encryptedSize(meta.size, plain)
         val name = if (i == 0) "${peer.id}/$mid.$headExt" else "${peer.id}/$mid-$i.prt"
         var attempt = 0
+        var slowTries = 0   // 这一段因为太慢换过几次连接：换 3 次还是慢就不再判慢了（网络本来就慢）
         while (true) {
             var last = 0L
+            val t0 = System.nanoTime()
             try {
-                WebDav.put(c, name, total, ctl) { out ->
+                WebDav.put(c, name, total, ctl, fresh = slowTries > 0 || attempt > 0) { out ->
                     val ins = open()
                     try {
                         skipFully(ins, i * psz)
@@ -918,6 +926,10 @@ object Relay {
                                 sent.addAndGet(v - last)
                                 last = v
                                 onProgress(sent.get())
+                            }
+                            // 边传边看速度：这一段太慢就中断，换新连接重传（没有定时器，每写一块顺便算一下）
+                            if (slowTries < 3 && WebDav.isSlow((System.nanoTime() - t0) / 1_000_000L, v)) {
+                                throw WebDav.SlowException("第 ${i + 1} 段上传太慢")
                             }
                         }, limit = plain)
                     } finally {
@@ -949,6 +961,10 @@ object Relay {
             } catch (e: IOException) {
                 ctl?.check()   // 取消中断了正在传的请求：不要重试
                 synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }
+                if (e is WebDav.SlowException || e.cause is WebDav.SlowException) {
+                    slowTries++   // 太慢：马上换新连接重传，不等
+                    continue
+                }
                 if (attempt++ < 2) {
                     delay(1500L * attempt)
                     ctl?.check()
@@ -1405,17 +1421,25 @@ object Relay {
     private suspend fun fetchPart(c: DavConfig, m: Multi, i: Int, lv: Live): okio.Buffer {
         val name = "${Store.deviceId}/${m.mid}-$i.prt"
         val max = m.psz + (m.psz / RelayCrypto.CHUNK + 2) * 20 + 4096
+        var slowTries = 0   // 这一段因为太慢换过几次连接：换 3 次还是慢就不再判慢了（网络本来就慢，让它慢慢下）
         fun tryGet(): okio.Buffer? {
-            var added = 0L
-            return try {
-                WebDav.getBuffer(c, name, max, m.ctl) { d ->
-                    added += d
-                    m.inflight.addAndGet(d)
-                    showProgress(m)
-                }.also { DavQuota.addDown(it.size) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
-            } catch (e: Exception) {
-                m.inflight.addAndGet(-added)   // 这次没下成：已经算进去的字节撤回
-                if (e is WebDav.DavException && e.code == 404) null else throw e
+            while (true) {
+                var added = 0L
+                try {
+                    return WebDav.getBuffer(c, name, max, m.ctl, fresh = slowTries > 0, slowCheck = slowTries < 3) { d ->
+                        added += d
+                        m.inflight.addAndGet(d)
+                        showProgress(m)
+                    }.also { DavQuota.addDown(it.size) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
+                } catch (e: Exception) {
+                    m.inflight.addAndGet(-added)   // 这次没下成：已经算进去的字节撤回
+                    if (e is WebDav.SlowException) {
+                        m.ctl.check()
+                        slowTries++
+                        continue
+                    }
+                    if (e is WebDav.DavException && e.code == 404) return null else throw e
+                }
             }
         }
         var waitStart = now()   // 从什么时候开始一直没有新动静（放弃的时间从这里算）
