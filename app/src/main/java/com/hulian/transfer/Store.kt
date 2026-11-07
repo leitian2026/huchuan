@@ -115,6 +115,24 @@ object Store {
             }
         }
         set(v) { prefs.edit().putString("rSent", v.entries.joinToString("\n") { it.key + "=" + it.value }).apply() }
+    /** 让对方看到“已读”：打开和对方的聊天时，告诉对方它发来的消息已读（可以在设置里关掉） */
+    var readReceipts: Boolean
+        get() = prefs.getBoolean("readReceipts", true)
+        set(v) { prefs.edit().putBoolean("readReceipts", v).apply() }
+
+    /** 聊天输入框里没发出去的草稿，按对方设备分开存 */
+    fun draft(peerId: String): String = prefs.getString("draft_$peerId", "") ?: ""
+    fun setDraft(peerId: String, text: String) {
+        prefs.edit().apply { if (text.isEmpty()) remove("draft_$peerId") else putString("draft_$peerId", text) }.apply()
+    }
+
+    /** 对方撤回的消息 id：撤回通知比消息先到（消息还在路上）时记下，消息到了就不显示。最多记 200 条 */
+    fun isRecalled(cid: String): Boolean = (prefs.getString("recalled", "") ?: "").split('\n').contains(cid)
+    fun addRecalled(cid: String) {
+        val l = (prefs.getString("recalled", "") ?: "").split('\n').filter { it.isNotEmpty() && it != cid } + cid
+        prefs.edit().putString("recalled", l.takeLast(200).joinToString("\n")).apply()
+    }
+
     /** 是否启用自建 DoH（只用于网盘，默认关）。关闭时填的地址保留但不使用，没有映射的域名直接走系统 DNS */
     var dohOn: Boolean
         get() = prefs.getBoolean("dnsDohOn", false)
@@ -210,6 +228,7 @@ object Store {
                         .put("name", m.name).put("file", m.file).put("size", m.size)
                         .put("done", m.done).put("state", m.state.name).put("uri", m.uri)
                         .put("pkg", m.pkg).put("ver", m.ver).put("err", m.error).put("rd", m.read)
+                        .put("rid", m.rid).put("qt", m.quote).put("sn", m.seen)
                         .toString()
                 }
             }
@@ -230,13 +249,19 @@ object Store {
                 st = MsgState.FAILED
                 err = "已中断"
             }
+            // 发出去、对方 7 天都没接收：接收方早已把文件清掉（取消通知也可能没送到），这里直接收尾
+            if (st == MsgState.WAITING && o.optString("kind") != "TEXT" && System.currentTimeMillis() - o.getLong("time") > 7L * 24 * 3600_000) {
+                st = MsgState.CANCELED
+                err = "对方 7 天内没有接收，文件已自动清除"
+            }
             Msg(
                 id = o.getString("id"), peerId = o.getString("peer"), outgoing = o.getBoolean("out"),
                 kind = Kind.valueOf(o.getString("kind")), time = o.getLong("time"),
                 text = o.optString("text"), name = o.optString("name"), file = o.optString("file"),
                 size = o.optLong("size"), done = o.optLong("done"), state = st,
                 uri = o.optString("uri"), pkg = o.optString("pkg"), ver = o.optString("ver"), error = err,
-                read = o.optBoolean("rd", true)
+                read = o.optBoolean("rd", true),
+                rid = o.optString("rid"), quote = o.optString("qt"), seen = o.optBoolean("sn")
             )
         }.filter { it.state != MsgState.OFFERED }   // 待接收的卡片不保留：重启后网盘扫描会重新生成
     } catch (e: Exception) {
