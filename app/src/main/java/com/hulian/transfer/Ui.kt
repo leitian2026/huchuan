@@ -1133,8 +1133,8 @@ private fun TransferButtons(m: Msg) {
 fun FileCard(m: Msg, onClick: () -> Unit, onLong: () -> Unit = {}) {
     val pct = if (m.size > 0) (m.done.toFloat() / m.size).coerceIn(0f, 1f) else 0f
     val status = when (m.state) {
-        MsgState.SENDING -> "发送中 ${(pct * 100).toInt()}%"
-        MsgState.RECEIVING -> "接收中 ${(pct * 100).toInt()}%"
+        MsgState.SENDING -> "发送中 ${(pct * 100).toInt()}%" + (if (m.error.isNotEmpty()) " · ${m.error}" else "")
+        MsgState.RECEIVING -> "接收中 ${(pct * 100).toInt()}%" + (if (m.error.isNotEmpty()) " · ${m.error}" else "")
         MsgState.PAUSED -> if (m.error.isNotEmpty()) "已暂停：${m.error}" else "已暂停 ${(pct * 100).toInt()}%"
         MsgState.CANCELED -> "已取消"
         MsgState.DONE -> if (m.outgoing) "已发送" else if (m.kind == Kind.APP) "已接收，点击安装" else "已接收，点击打开"
