@@ -158,6 +158,9 @@ object Relay {
     private const val DONE_MAX = 1500
     /** 对方发来的文件超过这么久一直没接收：自动清掉 */
     private const val UNACCEPTED_MAX_AGE_MS = 7L * 24 * 3600_000
+
+    /** 700 KB 以内的文字和文件直接放在 Cloudflare 的通知里发，不走网盘（Cloudflare 的 WebSocket 单条消息上限是 1 MB，加密后再转文本会大三分之一） */
+    private const val INLINE_MAX = 700_000L
     /** 消息里（已加密校验）的发送时间比这还早，就当作被人重放的旧文件 */
     private const val MAX_AGE_MS = 30L * 24 * 3600 * 1000
     private val midPattern = Regex("[A-Za-z0-9-]{1,64}")
@@ -265,6 +268,84 @@ object Relay {
 
     /** 对方中止了发送，或者很久没有继续上传：消息在聊天里已标成失败，不再弹框 */
     private class PeerGoneException(msg: String, val aborted: Boolean, val n: Int) : IOException(msg)
+
+    // ---------- 直接放在通知里的内容（不走网盘） ----------
+
+    private fun inlineDir() = java.io.File(Hub.app.filesDir, "inline")
+    private fun inlineFile(mid: String) = java.io.File(inlineDir(), "$mid.bin")
+    private val inlineRecovered = AtomicBoolean(false)
+
+    /**
+     * 收到直发的内容：先存到本机文件（存好才回执，进程这时被杀也不会丢，Cloudflare 会补发），再走和网盘文件完全一样的接收流程。
+     * 文件要等用户点“接收”，所以文件留在本机，接收 / 拒绝 / 7 天过期时才删
+     */
+    private fun handleInline(from: String, mid: String, b64: String, n: Long) {
+        Hub.scope.launch(Dispatchers.IO) {
+            var ok = true
+            try {
+                if (midPattern.matches(mid) && !doneMids.contains(mid) && !offers.containsKey(mid) && !inlineFile(mid).exists()) {
+                    val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                    val f = inlineFile(mid)
+                    f.parentFile?.mkdirs()
+                    val tmp = java.io.File(f.path + ".tmp")
+                    tmp.writeBytes(bytes)
+                    if (!tmp.renameTo(f)) ok = false
+                }
+            } catch (e: Exception) {
+                ok = false
+                Hub.log("Relay", e)
+            }
+            if (n > 0 && ok) sock?.send(JSONObject().put("op", "ack").put("n", n).toString())
+            if (ok && midPattern.matches(mid) && !doneMids.contains(mid)) receive(from, mid, ".bin")
+        }
+    }
+
+    /** 重启后：之前存下来、还没处理完的直发内容（待接收的文件）重新生成卡片；已经处理过的残留删掉 */
+    private fun recoverInline() {
+        if (!inlineRecovered.compareAndSet(false, true)) return
+        Hub.scope.launch(Dispatchers.IO) {
+            inlineDir().listFiles()?.forEach { f ->
+                val mid = f.name.removeSuffix(".bin")
+                if (!midPattern.matches(mid)) { f.delete(); return@forEach }
+                if (doneMids.contains(mid)) f.delete()
+                else if (!offers.containsKey(mid)) receive(null, mid, ".bin")
+            }
+        }
+    }
+
+    private suspend fun sendInline(peer: Peer, header: JSONObject, size: Long, open: (() -> InputStream)?, onProgress: (Long) -> Unit, ctl: TransferCtl?, localId: String?, mid: String) {
+        ctl?.check()
+        val s = sock
+        if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
+        val meta = JSONObject(header.toString()).put("mid", mid).put("from", Store.deviceId).put("ts", now())
+            .toString().toByteArray(Charsets.UTF_8)
+        val key = RelayCrypto.key(peer.rk)
+        val blob = withContext(Dispatchers.IO) {
+            val bo = java.io.ByteArrayOutputStream(maxOf(1024, size.toInt() + 512))
+            val ins = open?.invoke()
+            try {
+                RelayCrypto.encrypt(key, meta, ins, bo, onProgress)
+            } finally {
+                ins?.close()
+            }
+            bo.toByteArray()
+        }
+        ctl?.check()
+        val ack = CompletableDeferred<Boolean>()
+        acks[mid] = ack
+        try {
+            val msg = notifyMsg(peer.id, JSONObject().put("mid", mid).put("inl", android.util.Base64.encodeToString(blob, android.util.Base64.NO_WRAP)))
+            if (!s.send(msg)) throw IOException("消息没发出去：和 Cloudflare 的连接刚刚断开")
+            // 上行慢的时候要多等一会：按至少 20 KB/s 估算
+            withTimeout(15_000L + blob.size / 20L) { ack.await() }
+        } catch (e: TimeoutCancellationException) {
+            throw IOException("Cloudflare 没有确认消息已发出（网络太慢或刚好断开）", e)
+        } finally {
+            acks.remove(mid)
+        }
+        onProgress(size)
+        markWaiting(localId, header)
+    }
 
     private fun markDone(mid: String) {
         synchronized(doneMids) {
@@ -424,6 +505,7 @@ object Relay {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connected.value = true
                 Hub.resendFailedText()
+                recoverInline()
                 openedThisRound = true
                 backoff = 2000L
                 state.value = if (Store.dav == null) "已连接（但${Store.davName}账号没填，收不到内容）" else "已连接"
@@ -502,9 +584,10 @@ object Relay {
                 }
                 "notify" -> {
                     val n = j.optLong("n", 0L)
-                    if (n > 0) sock?.send(JSONObject().put("op", "ack").put("n", n).toString())   // 先回执再处理；重复收到的靠消息编号去重
                     val from = j.getString("from")
                     val body = j.getJSONObject("body")
+                    // 先回执再处理；重复收到的靠消息编号去重。直发的内容例外：存到本机文件后才回执（handleInline）
+                    if (n > 0 && !body.has("inl")) sock?.send(JSONObject().put("op", "ack").put("n", n).toString())
                     if (body.optBoolean("bye")) {   // 对方主动下线：马上标为离线
                         online.value = online.value - from
                         return
@@ -513,6 +596,7 @@ object Relay {
                     val mid = body.getString("mid")
                     body.optJSONObject("q")?.let { DavQuota.peerReport(from, it) }   // 对方带来的坚果云用量
                     if (body.optBoolean("qonly")) return   // 只是报用量
+                    if (body.has("inl")) { handleInline(from, mid, body.optString("inl"), n); return }
                     if (body.optBoolean("got")) {   // 接收方收完了：发出去的文件从“等待对方接收”变成“已发送”
                         sentMap[mid]?.let { id ->
                             Hub.patch(id) {
@@ -622,6 +706,10 @@ object Relay {
         if (localId != null) rememberSent(mid, localId)
         val headExt = Store.relayHeadExt
         val psz = partSize(size)
+        if (size <= INLINE_MAX) {   // 小内容直接放通知里发，不碰网盘
+            sendInline(peer, header, size, open, onProgress, ctl, localId, mid)
+            return
+        }
         if (open != null && size > psz) {
             sendParts(peer, header, size, open, onProgress, c, mid, psz, ctl)
             markWaiting(localId, header)
@@ -924,6 +1012,9 @@ object Relay {
     }
 
     private fun quietDelete(c: DavConfig, name: String) {
+        // 直发的内容存在本机文件里，不在网盘上：删本机文件，不发网盘请求（省请求次数）
+        val base = name.substringAfterLast('/')
+        if (base.length >= 36 && inlineFile(base.substring(0, 36)).delete()) return
         try {
             WebDav.delete(c, name)
         } catch (e: WebDav.DavException) {
@@ -991,11 +1082,13 @@ object Relay {
             while (true) {
                 try {
                     try {
-                        WebDav.get(c, path) { ins ->
+                        val localHead = inlineFile(mid).takeIf { it.exists() }   // 直发的内容在本机文件里，不用下载
+                        val onHead: (InputStream) -> Unit = { ins ->
                             val cin = CountingInputStream(ins)
                             multi = handleStream(mid, peers, cin, lv)
-                            DavQuota.addDown(cin.count)
+                            if (localHead == null) DavQuota.addDown(cin.count)
                         }
+                        if (localHead != null) localHead.inputStream().use(onHead) else WebDav.get(c, path, block = onHead)
                     } catch (e: WebDav.DavException) {
                         if (e.code == 404) {
                             if (extIdx + 1 < exts.size) {   // 换另一个扩展名再找一次
@@ -1027,7 +1120,7 @@ object Relay {
             multi?.let { finishMulti(c, it, lv) }
             markDone(mid)
             multi?.let { deleteParts(c, mid, it.n) }
-            try { WebDav.delete(c, path) } catch (e: Exception) { Hub.log("删除已收到的中转文件", e) }
+            quietDelete(c, path)
             lv.peerId?.let { reportUsage(it, mid) }
         } catch (e: OfferException) {
             try {
@@ -1055,7 +1148,7 @@ object Relay {
                 // 旧密钥已经没了，以后也不可能解开。删掉它，免得每次重连都再扫到、再弹一次框；只记入错误记录，不打扰
                 Hub.log("远程中转：网盘里有一条解不开的旧内容，已删除（$mid）", e)
                 try {
-                    Store.dav?.let { WebDav.delete(it, path) }
+                    Store.dav?.let { quietDelete(it, path) }
                 } catch (d: Exception) {
                     Hub.log("删除解不开的中转文件", d)
                 }
@@ -1107,7 +1200,7 @@ object Relay {
         } catch (e: StaleException) {
             markDone(mid)
             Hub.report("远程接收：已丢弃过旧的消息", e, "消息：$mid")
-            try { Store.dav?.let { WebDav.delete(it, path) } } catch (d: Exception) { Hub.log("删除过旧的中转文件", d) }
+            Store.dav?.let { quietDelete(it, path) }
         } catch (e: Exception) {
             if (accepted.contains(mid)) {
                 // 用户点了接收但失败了：网盘上的文件留着，聊天里给“重试”（不记成已处理，也不会被清理）
@@ -1375,7 +1468,12 @@ object Relay {
         val expired = entries.filter { e -> headOf(e.name) != null && e.modified > 0L && now - e.modified > UNACCEPTED_MAX_AGE_MS }
             .mapNotNull { headOf(it.name)?.first }
             .filter { it !in processing && !live.containsKey(it) && !accepted.contains(it) }.toSet()
-        for (mid in expired) {
+        val inlExpired = inlineDir().listFiles()
+            ?.filter { it.lastModified() > 0L && now - it.lastModified() > UNACCEPTED_MAX_AGE_MS }
+            ?.map { it.name.removeSuffix(".bin") }
+            ?.filter { it !in processing && !live.containsKey(it) && !accepted.contains(it) }.orEmpty()
+        for (mid in expired + inlExpired) {
+            inlineFile(mid).delete()
             val card = Hub.msgs.value.firstOrNull { it.id == mid && !it.outgoing }
             offers.remove(mid)
             if (card != null && (card.state == MsgState.OFFERED || card.state == MsgState.FAILED)) {
