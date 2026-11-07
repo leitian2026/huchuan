@@ -38,6 +38,12 @@ object Http {
      */
     val dav: OkHttpClient = base(NetDns.dav, http1 = true)
 
+    /** 分段下载用：共用同一个连接池和调度器，只是读超时缩短到 20 秒（连接彻底卡死时更快发现，别等 60 秒） */
+    val davGet: OkHttpClient by lazy { dav.newBuilder().readTimeout(20, TimeUnit.SECONDS).build() }
+
+    /** 分段上传用：写超时缩短到 20 秒（读超时仍是 60 秒：传完后等网盘处理要不了几秒，但有的网盘可能慢） */
+    val davPut: OkHttpClient by lazy { dav.newBuilder().writeTimeout(20, TimeUnit.SECONDS).build() }
+
     /** WebSocket 长连接：不设读超时（心跳由应用自己发） */
     val ws: OkHttpClient by lazy { client.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).build() }
 }
@@ -49,6 +55,15 @@ object WebDav {
      * waitMs：被限速（429）时建议等多久再发请求（毫秒），0 表示没有。
      * queued：true 表示这个请求根本没发出去（正在退避中，本软件自己拦下了），重试时不算一次失败
      */
+    /** 一段传得太慢（连接被限到很低的速度、但没断）：调用方换一条新连接重传这一段 */
+    class SlowException(msg: String) : IOException(msg)
+
+    /** 慢连接判定：这一段已经传了至少这么久，平均速度还低于下面这个值（字节 / 秒） */
+    const val SLOW_AFTER_MS = 8_000L
+    const val SLOW_MIN_BPS = 20_000L
+
+    fun isSlow(elapsedMs: Long, bytes: Long): Boolean = elapsedMs >= SLOW_AFTER_MS && bytes * 1000L / elapsedMs < SLOW_MIN_BPS
+
     class DavException(
         val code: Int, msg: String, val blocked: Boolean = false,
         val waitMs: Long = 0L, val queued: Boolean = false
@@ -206,10 +221,10 @@ object WebDav {
         }
     }
 
-    private fun call(req: Request, op: String): Response {
+    private fun call(req: Request, op: String, client: OkHttpClient = Http.dav): Response {
         checkNotBlocked(op)
         DavQuota.noteRequest()
-        val r = Http.dav.newCall(req).execute()
+        val r = client.newCall(req).execute()
         if (!r.isSuccessful) {
             val code = r.code
             val body = bodyOf(r)
@@ -246,7 +261,7 @@ object WebDav {
     }
 
     /** length 必须是准确的字节数（服务器要 Content-Length）；writer 往里写刚好这么多 */
-    fun put(c: DavConfig, sub: String, length: Long, tag: Any? = null, writer: (OutputStream) -> Unit) {
+    fun put(c: DavConfig, sub: String, length: Long, tag: Any? = null, fresh: Boolean = false, writer: (OutputStream) -> Unit) {
         val body = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
             override fun contentLength() = length
@@ -254,7 +269,8 @@ object WebDav {
         }
         val req = if (c.s3) S3.request(c, "PUT", S3.objUrl(c, sub), body, tag)
             else builder(c, url(c, sub)).put(body).tag(tag).build()
-        call(req, "上传").close()
+        // fresh：重传时用新连接（这次用完就关），不再碰刚才那条慢连接
+        call(if (fresh) req.newBuilder().header("Connection", "close").build() else req, "上传", Http.davPut).close()
     }
 
     private fun getReq(c: DavConfig, sub: String, tag: Any?): Request =
@@ -297,18 +313,28 @@ object WebDav {
 
     /** 下载一个不大的文件到内存；超过 max 字节就报错（免得对方 / 服务器塞个超大文件把内存撑爆） */
     /** 整个下载进内存（okio 缓冲，不再多复制一份字节数组）。onBytes 每读到一块数据就回调（字节数），用来边下边显示进度 */
-    fun getBuffer(c: DavConfig, sub: String, max: Long, tag: Any? = null, onBytes: ((Long) -> Unit)? = null): okio.Buffer =
-        call(getReq(c, sub, tag), "下载").use { r ->
+    fun getBuffer(
+        c: DavConfig, sub: String, max: Long, tag: Any? = null, fresh: Boolean = false, slowCheck: Boolean = false,
+        onBytes: ((Long) -> Unit)? = null
+    ): okio.Buffer {
+        val base = getReq(c, sub, tag)
+        // slowCheck：边下边看速度（每读一块顺便算一下，没有定时器）：太慢就抛 SlowException，调用方换新连接重下这一段
+        return call(if (fresh) base.newBuilder().header("Connection", "close").build() else base, "下载", Http.davGet).use { r ->
             val src = r.body!!.source()
             val buf = okio.Buffer()
+            val t0 = System.nanoTime()
             while (true) {
                 val n = src.read(buf, 65536L)
                 if (n < 0L) break
                 if (buf.size > max) throw IOException("下载的文件比预期的大")
                 onBytes?.invoke(n)
+                if (slowCheck && isSlow((System.nanoTime() - t0) / 1_000_000L, buf.size)) {
+                    throw SlowException("这一段下载太慢（${buf.size / 1024} KB，${(System.nanoTime() - t0) / 1_000_000_000L} 秒）")
+                }
             }
             buf
         }
+    }
 
     fun delete(c: DavConfig, sub: String) {
         val req = if (c.s3) S3.request(c, "DELETE", S3.objUrl(c, sub), null, null)
