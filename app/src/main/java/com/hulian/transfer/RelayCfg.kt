@@ -21,7 +21,7 @@ object RelayCfg {
         .put("dp", Store.davPass).put("dd", Store.davDir).put("he", Store.relayHeadExt)
         .put("hs", Store.hostsText).put("ho", Store.hostsOn)
         .put("dh", Store.dohUrl).put("do", Store.dohOn)
-        .put("cs", Store.cfSysDns).put("ds", Store.davSysDns)
+        .put("cs", Store.cfSysDns).put("ds", Store.davSysDns).put("cd", Store.cfDohOn)
 
     /** 本机没有设置时才应用。成功返回 null；不接受就返回原因（会回给对方） */
     fun applyIfEmpty(j: JSONObject): String? {
@@ -56,6 +56,7 @@ object RelayCfg {
         // 两路各自的“使用系统 DNS”：旧版本发来的没有这两项，保持本机默认（开）
         if (j.has("cs")) Store.cfSysDns = j.optBoolean("cs", false)
         if (j.has("ds")) Store.davSysDns = j.optBoolean("ds", false)
+        if (j.has("cd")) Store.cfDohOn = j.optBoolean("cd", false) && Store.dohUrl.isNotEmpty()
         Store.relayUrl = u
         Store.relaySecret = s
         Store.relayOn = true
