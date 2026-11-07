@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 公网请求的域名解析，防 DNS 劫持。Cloudflare（WebSocket）和网盘（WebDAV）各用一套，互不影响：
  *  1. Host 映射（设置里填：域名 → IP；有总开关，默认开；两路共用同一份）。命中就直接用，不发任何 DNS 查询；一个域名可以填多个 IP，连不上会依次换下一个
- *  2. 自建 DoH（只有网盘用；设置里的开关，默认关；可填多个，按顺序试）。只对没有 Host 映射的域名生效。加密 DNS，运营商看不到也改不了
+ *  2. 自建 DoH（网盘和 Cloudflare 各有一个开关，默认都关，地址共用；可填多个，按顺序试）。只对没有 Host 映射的域名生效。加密 DNS，运营商看不到也改不了
  *  3. 系统 DNS：由各自的“使用系统 DNS”开关决定（Cloudflare、网盘各一个，默认开）。开着：前面都没解析出来就用系统 DNS；
  *     关着：绝不碰系统 DNS，前面都没解析出来就是连不上
  *
@@ -146,11 +146,11 @@ object NetDns {
         // 1. Host 映射（开关关着就整个跳过）
         activeHosts()[host]?.let { if (it.isNotEmpty()) return Result(it, "Host 映射") }
 
-        // 2. 自建 DoH 只给网盘用。局域网名字（nas.local、没有点的主机名等）公网 DoH 查不到，不走 DoH
+        // 2. 自建 DoH：网盘用“使用自建 DoH”开关，Cloudflare 用自己的开关（地址共用）。局域网名字（nas.local、没有点的主机名等）公网 DoH 查不到，不走 DoH
         var last: Exception? = null
         var dohTried = false
         val dohText = Store.dohUrl.trim()
-        if (chan == Chan.DAV && Store.dohOn && dohText.isNotEmpty() && !isLocalName(host)) {
+        if ((if (chan == Chan.DAV) Store.dohOn else Store.cfDohOn) && dohText.isNotEmpty() && !isLocalName(host)) {
             cache[host]?.let { if (System.currentTimeMillis() - it.at < TTL_MS) return it.r }
             for (d in dohList(dohText, sysOk)) {
                 dohTried = true
@@ -171,7 +171,7 @@ object NetDns {
         if (sysOk) return Result(ipv4First(Dns.SYSTEM.lookup(hostname)), if (dohTried) "系统 DNS（DoH 没解析出来，已回退）" else "系统 DNS")
         val why = last?.let { it.message ?: it.javaClass.simpleName }
         val msg = if (dohTried) "自建 DoH 解析 $hostname 失败：${why ?: "没有返回地址"}（已关闭“使用系统 DNS”，不回退）"
-        else "$hostname 没有 Host 映射" + (if (chan == Chan.DAV) "、没有可用的自建 DoH" else "") + "，且已关闭“使用系统 DNS”，没法解析"
+        else "$hostname 没有 Host 映射" + (if (if (chan == Chan.DAV) Store.dohOn else Store.cfDohOn) "、没有可用的自建 DoH" else "") + "，且已关闭“使用系统 DNS”，没法解析"
         throw UnknownHostException(msg).also { if (last != null) it.initCause(last) }
     }
 
