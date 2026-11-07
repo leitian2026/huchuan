@@ -72,7 +72,7 @@ object Relay {
     }
     /** 一个文件传完上传、通知也发出去了：聊天里显示“等待对方接收”（对方收完会回通知改成“已发送”） */
     private fun markWaiting(localId: String?, header: JSONObject) {
-        if (localId == null || header.optString("type") != "file") return
+        if (localId == null) return
         Hub.patch(localId) {
             if (it.state == MsgState.SENDING || it.state == MsgState.PAUSED) it.copy(state = MsgState.WAITING, done = it.size, error = "") else it
         }
@@ -89,6 +89,30 @@ object Relay {
     }
 
     fun canRetryReceive(id: String) = keepMids.contains(id)
+
+    /** 发控制消息（已读、撤回…）：连着 Cloudflare 就发，对方不在线 Cloudflare 会暂存；发出去了返回 true */
+    suspend fun sendCtl(to: String, ctl: JSONObject): Boolean {
+        if (!connected.value) return false
+        return try {
+            sendNotify(to, JSONObject().put("ctl", ctl))
+            true
+        } catch (e: Exception) {
+            Hub.log("Relay", e)
+            false
+        }
+    }
+
+    /** 对方撤回了还没接收的文件：撤掉待接收卡片、清掉网盘上的文件（不用通知对方，是它自己撤的） */
+    fun dropOffer(mid: String) {
+        val o = offers.remove(mid) ?: return
+        markDone(mid)
+        Hub.scope.launch(Dispatchers.IO) {
+            Store.dav?.let { d ->
+                if (o.parts > 1) deleteParts(d, mid, o.parts)
+                quietDelete(d, "${Store.deviceId}/$mid${if (o.ext.startsWith(".")) o.ext else "." + o.ext}")
+            }
+        }
+    }
 
     /** 接收失败的文件点“重试”：网盘上的文件还在，直接重新收（不用对方重发，也不用再点“接收”） */
     fun retryReceive(mid: String) {
@@ -399,6 +423,7 @@ object Relay {
         val s = Http.ws.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connected.value = true
+                Hub.resendFailedText()
                 openedThisRound = true
                 backoff = 2000L
                 state.value = if (Store.dav == null) "已连接（但${Store.davName}账号没填，收不到内容）" else "已连接"
@@ -484,13 +509,14 @@ object Relay {
                         online.value = online.value - from
                         return
                     }
+                    body.optJSONObject("ctl")?.let { Hub.onCtl(from, it); return }   // 回执 / 撤回等控制消息
                     val mid = body.getString("mid")
                     body.optJSONObject("q")?.let { DavQuota.peerReport(from, it) }   // 对方带来的坚果云用量
                     if (body.optBoolean("qonly")) return   // 只是报用量
                     if (body.optBoolean("got")) {   // 接收方收完了：发出去的文件从“等待对方接收”变成“已发送”
                         sentMap[mid]?.let { id ->
                             Hub.patch(id) {
-                                if (it.outgoing && (it.state == MsgState.WAITING || it.state == MsgState.SENDING)) it.copy(state = MsgState.DONE, done = it.size, error = "") else it
+                                if (it.outgoing && (it.state == MsgState.WAITING || it.state == MsgState.SENDING || (it.state == MsgState.FAILED && it.error == "已中断"))) it.copy(state = MsgState.DONE, done = it.size, error = "") else it
                             }
                         }
                         return
@@ -593,7 +619,7 @@ object Relay {
         if (s == null || !connected.value) throw IOException("没有连上 Cloudflare 中转服务器：" + state.value)
         val c = Store.dav ?: throw IOException("还没填${Store.davName}账号")
         val mid = newId()
-        if (localId != null && header.optString("type") == "file") rememberSent(mid, localId)
+        if (localId != null) rememberSent(mid, localId)
         val headExt = Store.relayHeadExt
         val psz = partSize(size)
         if (open != null && size > psz) {
@@ -1005,6 +1031,16 @@ object Relay {
             lv.peerId?.let { reportUsage(it, mid) }
         } catch (e: OfferException) {
             try {
+                if (Store.isRecalled(e.meta.optString("cid"))) {
+                    // 对方在消息还没来得及显示时就撤回了：不显示，直接清掉网盘上的文件
+                    markDone(mid)
+                    Store.dav?.let { d ->
+                        val parts = e.meta.optInt("parts", 1).coerceAtLeast(1)
+                        if (parts > 1) deleteParts(d, mid, parts)
+                        quietDelete(d, path)
+                    }
+                    return@withContext
+                }
                 offers[mid] = Offer(fromHint, e.peer.id, exts[extIdx], e.meta.optInt("parts", 1).coerceAtLeast(1))
                 Inbox.offerFile(e.peer.id, mid, e.meta)
             } catch (x: Exception) {
@@ -1152,7 +1188,8 @@ object Relay {
             "text" -> {
                 val text = meta.getString("text")
                 if (text.length > Server.MAX_TEXT_LEN) throw IOException("文字太长")
-                Inbox.addText(peer.id, text)
+                Inbox.addText(peer.id, text, meta.optString("cid"), meta.optString("rq"))
+                sendGot(peer.id, mid)   // 告诉发送方：文字本机收到了（“已发出”变“已送达”）
                 null
             }
             "file" -> {
