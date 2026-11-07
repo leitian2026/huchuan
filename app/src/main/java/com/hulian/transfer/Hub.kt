@@ -512,7 +512,8 @@ object Hub {
             if (i < 0) return@update list
             val old = list[i]
             val n = f(old)
-            terminal = n.state == MsgState.DONE || n.state == MsgState.FAILED || n.state == MsgState.CANCELED
+            // 状态变了（等待对方接收、已读、撤回…）都要存盘，只有传输进度（状态没变）不存：否则重启后这些状态会丢，等待中的消息被当成“已中断”
+            terminal = n.state != old.state || n.seen != old.seen
             if (n == old) list else ArrayList(list).also { it[i] = n }
         }
         if (terminal) persistSoon()
@@ -520,8 +521,106 @@ object Hub {
 
     fun markRead(peerId: String) {
         Notifier.cancel(peerId)
-        if (_msgs.value.none { it.peerId == peerId && !it.outgoing && !it.read }) return
+        val newly = _msgs.value.filter { it.peerId == peerId && !it.outgoing && !it.read }
+        if (newly.isEmpty()) return
         _msgs.update { l -> l.map { if (it.peerId == peerId && !it.outgoing && !it.read) it.copy(read = true) else it } }
+        persistSoon()
+        // 让对方看到“已读”（设置里可以关）：打开聊天那一刻发一次，不是定时的
+        if (Store.readReceipts) {
+            val cids = newly.mapNotNull { it.rid.takeIf { r -> r.isNotEmpty() } }
+            if (cids.isNotEmpty()) sendCtl(peerId, JSONObject().put("op", "read").put("cids", org.json.JSONArray(cids)))
+        }
+    }
+
+    // ---------- 回执 / 撤回 / 删除 ----------
+
+    /** 发控制消息：同一个 Wi-Fi 能直连就直连，否则走远程中转。成功返回 true */
+    private suspend fun sendCtlNow(peerId: String, ctl: JSONObject): Boolean {
+        val peer = _peers.value[peerId] ?: return false
+        val direct = (Store.lanOn || Store.hotspotOn) && peer.online && Net.onLan(peer.host)
+        if (direct && withContext(Dispatchers.IO) { Net.sendCtl(peer, ctl) }) return true
+        if (Relay.ready(peer)) return Relay.sendCtl(peerId, ctl)
+        return false
+    }
+
+    fun sendCtl(peerId: String, ctl: JSONObject) {
+        scope.launch { sendCtlNow(peerId, ctl) }
+    }
+
+    /** 收到对方的控制消息 */
+    fun onCtl(pid: String, j: JSONObject) {
+        val arr = j.optJSONArray("cids") ?: return
+        val cids = (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotEmpty() }.toSet()
+        if (cids.isEmpty()) return
+        when (j.optString("op")) {
+            "read" -> {
+                _msgs.update { l ->
+                    l.map {
+                        if (it.outgoing && it.peerId == pid && it.id in cids && !it.seen)
+                            it.copy(seen = true, state = if (it.state == MsgState.WAITING && it.kind == Kind.TEXT) MsgState.DONE else it.state)
+                        else it
+                    }
+                }
+                persistSoon()
+            }
+            "recall" -> cids.forEach { onRecall(pid, it) }
+            "recallno" -> {
+                var any = false
+                _msgs.update { l ->
+                    l.map {
+                        if (it.outgoing && it.peerId == pid && it.id in cids && it.state == MsgState.RECALLED) {
+                            any = true
+                            it.copy(state = MsgState.DONE, error = "")
+                        } else it
+                    }
+                }
+                if (any) { toast("对方已经收到，无法撤回"); persistSoon() }
+            }
+        }
+    }
+
+    private fun onRecall(pid: String, cid: String) {
+        val m = _msgs.value.firstOrNull { !it.outgoing && it.peerId == pid && it.rid == cid }
+        if (m == null) {
+            Store.addRecalled(cid)   // 消息还在路上：记下，它到了就不显示
+            return
+        }
+        when {
+            m.state == MsgState.RECALLED -> {}
+            m.kind == Kind.TEXT -> {
+                patch(m.id) { it.copy(state = MsgState.RECALLED, text = "", quote = "") }
+                persistSoon()
+            }
+            m.state == MsgState.OFFERED -> {
+                Relay.dropOffer(m.id)
+                patch(m.id) { it.copy(state = MsgState.RECALLED) }
+                persistSoon()
+            }
+            // 文件已经开始接收或收完了：撤不了，告诉对方
+            else -> sendCtl(pid, JSONObject().put("op", "recallno").put("cids", org.json.JSONArray(listOf(cid))))
+        }
+    }
+
+    /** 能不能撤回：自己发的、2 分钟内；文字，或者对方还没接收的文件 */
+    fun canRecall(m: Msg): Boolean =
+        m.outgoing && now() - m.time <= 120_000L &&
+            ((m.kind == Kind.TEXT && (m.state == MsgState.DONE || m.state == MsgState.WAITING)) ||
+                (m.kind != Kind.TEXT && m.state == MsgState.WAITING))
+
+    fun recall(m: Msg) {
+        if (!canRecall(m)) return
+        scope.launch {
+            val ok = sendCtlNow(m.peerId, JSONObject().put("op", "recall").put("cids", org.json.JSONArray(listOf(m.id))))
+            if (ok) {
+                patch(m.id) { it.copy(state = MsgState.RECALLED) }
+                persistSoon()
+            } else toast("现在联系不上对方，撤回失败")
+        }
+    }
+
+    /** 删除（只删本机的记录；正在传输的不删） */
+    fun deleteMsgs(ids: Set<String>) {
+        _msgs.update { l -> l.filter { it.id !in ids || it.active } }
         persistSoon()
     }
 
@@ -531,8 +630,8 @@ object Hub {
     }
 
     // ---------- 发送 ----------
-    fun sendText(peerId: String, text: String) {
-        val m = Msg(newId(), peerId, true, Kind.TEXT, now(), text = text, state = MsgState.SENDING)
+    fun sendText(peerId: String, text: String, quote: String = "") {
+        val m = Msg(newId(), peerId, true, Kind.TEXT, now(), text = text, state = MsgState.SENDING, quote = quote)
         addMsg(m)
         doSend(m)
     }
@@ -607,6 +706,15 @@ object Hub {
         doSend(m)
     }
 
+    private val autoRetried = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** 连上中转服务器的那一刻：把之前因为没网 / 没连上而失败的文字补发一次（每条只补一次；对方按消息 id 去重，不会收到两条） */
+    fun resendFailedText() {
+        val limit = now() - 24 * 3600_000L
+        _msgs.value.filter { it.outgoing && it.kind == Kind.TEXT && it.state == MsgState.FAILED && it.time > limit && autoRetried.add(it.id) }
+            .forEach { doSend(it) }
+    }
+
     fun retry(m: Msg) {
         if (m.outgoing && (m.state == MsgState.FAILED || m.state == MsgState.CANCELED)) doSend(m)
     }
@@ -640,6 +748,8 @@ object Hub {
                 val peer = _peers.value[m.peerId] ?: throw IllegalStateException("设备不存在")
                 if (!peer.paired) throw IllegalStateException("尚未配对，请扫码重新配对")
                 val h = JSONObject()
+                h.put("cid", m.id)   // 这条消息的 id：对方的回执（已读）、撤回靠它对上同一条
+                if (m.kind == Kind.TEXT && m.quote.isNotEmpty()) h.put("rq", m.quote)
                 var total = 0L
                 var open: (() -> InputStream)? = null
                 when (m.kind) {
