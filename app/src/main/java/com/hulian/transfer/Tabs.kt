@@ -405,6 +405,14 @@ fun SettingsContent() {
         }
         BatteryCard()
         SettingsCard {
+            CardTitle("已读回执", help = "打开和对方的聊天时，让对方看到“已读”。关掉后对方看不到你读了没有（你也看不到对方的已读）。")
+            var rr by remember { mutableStateOf(Store.readReceipts) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("让对方看到我已读", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Switch(checked = rr, onCheckedChange = { rr = it; Store.readReceipts = it })
+            }
+        }
+        SettingsCard {
             CardTitle(
                 "接收文件保存位置",
                 help = "选一次即可，之后不会再询问。系统不允许直接选存储根目录或\u201c下载\u201d文件夹本身，请在里面新建一个子文件夹再选它。"
