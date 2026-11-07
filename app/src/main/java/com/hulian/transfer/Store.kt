@@ -148,6 +148,10 @@ object Store {
     var dohOn: Boolean
         get() = prefs.getBoolean("dnsDohOn", false)
         set(v) { prefs.edit().putBoolean("dnsDohOn", v).apply() }
+    /** Cloudflare 通知连接是否也用自建 DoH（默认关；DoH 地址和网盘共用同一份）。没有 Host 映射的域名才会问 DoH */
+    var cfDohOn: Boolean
+        get() = prefs.getBoolean("dnsCfDohOn", false)
+        set(v) { prefs.edit().putBoolean("dnsCfDohOn", v).apply() }
     /** 是否启用 Host 映射（默认开）。关闭时填的内容保留但不使用，DoH 服务器的引导解析也不再用它 */
     var hostsOn: Boolean
         get() = prefs.getBoolean("dnsHostsOn", true)
