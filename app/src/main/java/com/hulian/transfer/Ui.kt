@@ -541,9 +541,8 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     var firstScroll by remember { mutableStateOf(true) }
     LaunchedEffect(list.size) {
         if (list.isEmpty() || searching) return@LaunchedEffect
-        val li = ls.layoutInfo
-        val wasAtBottom = li.totalItemsCount == 0 || (li.visibleItemsInfo.lastOrNull()?.index ?: 0) >= li.totalItemsCount - 1
-        if (firstScroll || wasAtBottom || list.last().outgoing) ls.scrollToItem(list.size - 1)
+        // 列表是底部对齐的（最新一条是第 0 项）：新消息进来时本来就在底部附近（或是自己发的）才跟到底，往上翻历史时不抢位置
+        if (firstScroll || ls.firstVisibleItemIndex <= 1 || list.last().outgoing) ls.scrollToItem(0)
         firstScroll = false
     }
 
@@ -693,6 +692,36 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 TextButton(onClick = { searching = false; query = "" }) { Text("取消") }
             }
         }
+        // 提示条浮在列表上方，不占列表的高度：网络状态变化时它们出现 / 消失，聊天内容不会跟着跳
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+        if (list.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (searching && query.isNotBlank()) "没有找到" else "还没有传输记录", color = Gray, fontSize = 14.sp)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize(), state = ls, reverseLayout = true, contentPadding = PaddingValues(vertical = 8.dp)) {
+                itemsIndexed(list.asReversed(), key = { _, m -> m.id }) { j, m ->
+                    val i = list.size - 1 - j
+                    Column {
+                        if (i == 0 || m.time - list[i - 1].time > 300_000) {
+                            Text(
+                                SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(m.time)),
+                                color = Gray, fontSize = 12.sp,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        MsgRow(
+                            m, peer?.name ?: "?", selecting, m.id in selected,
+                            onClick = { onMsgClick(m) },
+                            onToggle = { if (m.id in selected) selected.remove(m.id) else selected.add(m.id) },
+                            onAction = { act -> onAction(m, act) }
+                        )
+                    }
+                }
+            }
+        }
+            Column(Modifier.align(Alignment.TopStart)) {
         // 远程中转的状态：和上面的热点状态是两回事。直连没连上时也能走远程中转发送，这里单独说清楚现在能不能用、不能用的原因
         val relayConn by Relay.connected.collectAsState()
         val relayState by Relay.state.collectAsState()
@@ -731,30 +760,6 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 )
             }
         }
-        if (list.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(if (searching && query.isNotBlank()) "没有找到" else "还没有传输记录", color = Gray, fontSize = 14.sp)
-            }
-        } else {
-            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = ls, contentPadding = PaddingValues(vertical = 8.dp)) {
-                itemsIndexed(list, key = { _, m -> m.id }) { i, m ->
-                    Column {
-                        if (i == 0 || m.time - list[i - 1].time > 300_000) {
-                            Text(
-                                SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(m.time)),
-                                color = Gray, fontSize = 12.sp,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                        MsgRow(
-                            m, peer?.name ?: "?", selecting, m.id in selected,
-                            onClick = { onMsgClick(m) },
-                            onToggle = { if (m.id in selected) selected.remove(m.id) else selected.add(m.id) },
-                            onAction = { act -> onAction(m, act) }
-                        )
-                    }
-                }
             }
         }
         var menuOpen by remember { mutableStateOf(false) }
