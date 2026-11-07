@@ -41,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -72,6 +73,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -484,6 +486,7 @@ fun previewOf(m: Msg): String {
         Kind.FILE -> if (isImageName(m.file.ifEmpty { m.name })) "[图片]" else "[文件]${m.name}"
         Kind.APP -> "[应用]${m.name}"
     }
+    if (m.state == MsgState.RECALLED) return if (m.outgoing) "你撤回了一条消息" else "对方撤回了一条消息"
     return if (m.outgoing && m.state == MsgState.FAILED) "[发送失败] $body" else body
 }
 
@@ -515,12 +518,29 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         // 界面被系统销毁重建时不断开：新界面马上会再进同一个对话框
         onDispose { if (!Hub.recreating) AutoLink.close() }
     }
-    val list = remember(all, peerId) { all.filter { it.peerId == peerId }.sortedBy { it.time } }
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val selected = remember { mutableStateListOf<String>() }
+    val selecting = selected.isNotEmpty()
+    var quoting by remember { mutableStateOf<Msg?>(null) }
+    var forwardList by remember { mutableStateOf<List<Msg>?>(null) }
+    val tfState = rememberTextFieldState(Store.draft(peerId))
+    // 草稿：输入框里没发出去的字，退出聊天再进来还在（停手 0.4 秒存一次，不是每个字都写）
+    LaunchedEffect(peerId) {
+        snapshotFlow { tfState.text.toString() }.collectLatest { delay(400); Store.setDraft(peerId, it) }
+    }
+    DisposableEffect(peerId) { onDispose { Store.setDraft(peerId, tfState.text.toString()) } }
+    BackHandler(enabled = selecting) { selected.clear() }
+    BackHandler(enabled = searching && !selecting) { searching = false; query = "" }
+    val list = remember(all, peerId, searching, query) {
+        val l = all.filter { it.peerId == peerId }.sortedBy { it.time }
+        if (searching && query.isNotBlank()) l.filter { it.state != MsgState.RECALLED && previewOf(it).contains(query.trim(), true) } else l
+    }
     val ls = rememberLazyListState()
     // 新消息来了：本来就停在最底部（或是自己发的、第一次进来）才滚到底；正在往上翻历史时不抢走位置
     var firstScroll by remember { mutableStateOf(true) }
     LaunchedEffect(list.size) {
-        if (list.isEmpty()) return@LaunchedEffect
+        if (list.isEmpty() || searching) return@LaunchedEffect
         val li = ls.layoutInfo
         val wasAtBottom = li.totalItemsCount == 0 || (li.visibleItemsInfo.lastOrNull()?.index ?: 0) >= li.totalItemsCount - 1
         if (firstScroll || wasAtBottom || list.last().outgoing) ls.scrollToItem(list.size - 1)
@@ -581,6 +601,21 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         }
     }
 
+    fun onAction(m: Msg, act: String) {
+        when (act) {
+            "copy" -> {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("消息", if (m.kind == Kind.TEXT) m.text else m.name))
+                Hub.toast("已复制")
+            }
+            "quote" -> quoting = m
+            "forward" -> forwardList = listOf(m)
+            "recall" -> Hub.recall(m)
+            "delete" -> Hub.deleteMsgs(setOf(m.id))
+            "select" -> { selected.clear(); selected.add(m.id) }
+        }
+    }
+
     val relayOnline by Relay.online.collectAsState()
     val title = when {
         peer == null -> "聊天"
@@ -615,7 +650,19 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        TopBar(title, onBack, statusTitle) {
+        if (selecting) {
+            Row(
+                Modifier.fillMaxWidth().background(Blue2).padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { selected.clear() }) { Icon(Icons.Default.Close, "取消多选", tint = Color.White) }
+                Text("已选 ${selected.size} 条", color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    forwardList = list.filter { it.id in selected }.filter { it.kind == Kind.TEXT || it.uri.isNotEmpty() }
+                }) { Text("转发", color = Color.White) }
+                TextButton(onClick = { Hub.deleteMsgs(selected.toSet()); selected.clear() }) { Text("删除", color = Color.White) }
+            }
+        } else TopBar(title, onBack, statusTitle) {
             Box {
                 IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "更多", tint = Color.White) }
                 DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
@@ -627,9 +674,23 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                             HotspotHost.stop()
                         })
                     }
+                    DropdownMenuItem(text = { Text("搜索聊天记录") }, onClick = { more = false; searching = true })
                     DropdownMenuItem(text = { Text("清空聊天记录") }, onClick = { more = false; Hub.clearHistory(peerId) })
                     DropdownMenuItem(text = { Text("删除此设备") }, onClick = { more = false; Hub.forgetPeer(peerId); onBack() })
                 }
+            }
+        }
+        if (searching) {
+            Row(Modifier.fillMaxWidth().background(Color(0xFFF7F8FA)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextField(
+                    value = query, onValueChange = { query = it }, modifier = Modifier.weight(1f), singleLine = true,
+                    placeholder = { Text("搜索聊天记录") }, shape = RoundedCornerShape(22.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
+                        focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent
+                    )
+                )
+                TextButton(onClick = { searching = false; query = "" }) { Text("取消") }
             }
         }
         // 远程中转的状态：和上面的热点状态是两回事。直连没连上时也能走远程中转发送，这里单独说清楚现在能不能用、不能用的原因
@@ -672,7 +733,7 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
         }
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("还没有传输记录", color = Gray, fontSize = 14.sp)
+                Text(if (searching && query.isNotBlank()) "没有找到" else "还没有传输记录", color = Gray, fontSize = 14.sp)
             }
         } else {
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = ls, contentPadding = PaddingValues(vertical = 8.dp)) {
@@ -686,17 +747,33 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                                 textAlign = TextAlign.Center
                             )
                         }
-                        MsgRow(m, peer?.name ?: "?") { onMsgClick(m) }
+                        MsgRow(
+                            m, peer?.name ?: "?", selecting, m.id in selected,
+                            onClick = { onMsgClick(m) },
+                            onToggle = { if (m.id in selected) selected.remove(m.id) else selected.add(m.id) },
+                            onAction = { act -> onAction(m, act) }
+                        )
                     }
                 }
             }
         }
-        val tfState = rememberTextFieldState()
         var menuOpen by remember { mutableStateOf(false) }
         var panel by remember { mutableStateOf(false) }
         val kb = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current
         BackHandler(enabled = panel) { panel = false }
+        quoting?.let { q ->
+            Row(
+                Modifier.fillMaxWidth().background(Color(0xFFEDEFF2)).padding(start = 14.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "回复：" + previewOf(q), color = Gray, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(vertical = 6.dp)
+                )
+                IconButton(onClick = { quoting = null }) { Icon(Icons.Default.Close, "取消回复", tint = Gray) }
+            }
+        }
         Row(Modifier.fillMaxWidth().background(Color(0xFFF7F8FA)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box {
                 IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Add, "更多", tint = Gray) }
@@ -735,7 +812,11 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
             )
             IconButton(onClick = {
                 val t = tfState.text.toString().trim()
-                if (t.isNotEmpty()) { Hub.sendText(peerId, t); tfState.clearText() }
+                if (t.isNotEmpty()) {
+                    Hub.sendText(peerId, t, quoting?.let { previewOf(it).take(80) } ?: "")
+                    quoting = null
+                    tfState.clearText()
+                }
             }) { Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Blue2) }
         }
         if (panel) {
@@ -747,6 +828,34 @@ fun ChatScreen(peerId: String, onBack: () -> Unit, onPickApps: () -> Unit) {
                 }
             )
         }
+    }
+    forwardList?.let { fl ->
+        AlertDialog(
+            onDismissRequest = { forwardList = null },
+            title = { Text("转发给") },
+            text = {
+                val targets = peers.values.filter { it.paired }
+                if (targets.isEmpty()) Text("还没有已配对的设备")
+                else Column(Modifier.verticalScroll(rememberScrollState())) {
+                    targets.forEach { t ->
+                        Text(
+                            t.name, fontSize = 16.sp,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                forwardList = null
+                                selected.clear()
+                                fl.sortedBy { it.time }.forEach { m ->
+                                    if (m.kind == Kind.TEXT) Hub.sendText(t.id, m.text)
+                                    else if (m.kind == Kind.FILE && m.uri.isNotEmpty()) Hub.sendFile(t.id, Uri.parse(m.uri))
+                                }
+                                Hub.toast("已转发")
+                            }.padding(vertical = 12.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { forwardList = null }) { Text("取消") } }
+        )
     }
 }
 
@@ -847,31 +956,64 @@ fun StickerPanel(onSend: (File) -> Unit, onImport: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
+fun MsgRow(
+    m: Msg, peerName: String, selecting: Boolean, selected: Boolean,
+    onClick: () -> Unit, onToggle: () -> Unit, onAction: (String) -> Unit
+) {
     val out = m.outgoing
+    if (m.state == MsgState.RECALLED) {
+        Text(
+            if (out) "你撤回了一条消息" else "对方撤回了一条消息", color = Gray, fontSize = 12.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+        )
+        return
+    }
     // 图片读不出来（文件被删、格式系统不支持）时退回文件卡片
     var imgFailed by remember(m.id) { mutableStateOf(false) }
+    var menu by remember(m.id) { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().background(if (selected) Color(0x1A1E88E5) else Color.Transparent)) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
         horizontalArrangement = if (out) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Top
     ) {
+        if (selecting) { Checkbox(checked = selected, onCheckedChange = null, modifier = Modifier.padding(end = 6.dp, top = 8.dp)); if (out) Spacer(Modifier.weight(1f)) }
         if (!out) { Avatar(peerName); Spacer(Modifier.width(8.dp)) }
         Column(horizontalAlignment = if (out) Alignment.End else Alignment.Start, modifier = Modifier.widthIn(max = 300.dp)) {
             if (m.kind == Kind.TEXT) {
-                Surface(shape = RoundedCornerShape(18.dp), color = if (out) OutBubble else Color.White) {
-                    SelectionContainer {
-                        Text(
-                            m.text, color = if (out) Color.White else Color(0xFF111111), fontSize = 16.sp,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                        )
+                Box {
+                    Surface(shape = RoundedCornerShape(18.dp), color = if (out) OutBubble else Color.White) {
+                        Column(
+                            Modifier.combinedClickable(onClick = {}, onLongClick = { menu = true })
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            if (m.quote.isNotEmpty()) {
+                                Text(
+                                    m.quote, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    color = if (out) Color(0xCCFFFFFF) else Gray,
+                                    modifier = Modifier.padding(bottom = 6.dp)
+                                        .background(if (out) Color(0x22FFFFFF) else Color(0xFFF1F3F6), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Text(m.text, color = if (out) Color.White else Color(0xFF111111), fontSize = 16.sp)
+                        }
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        MsgMenuItems(m, { menu = false }, onAction)
                     }
                 }
             } else if (isInlineImage(m) && !imgFailed) {
-                ImageBubble(m, onClick) { imgFailed = true }
+                ImageBubble(m, onClick, { imgFailed = true }, onAction)
             } else {
-                FileCard(m, onClick)
+                Box {
+                    FileCard(m, onClick, onLong = { menu = true })
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        MsgMenuItems(m, { menu = false }, onAction)
+                    }
+                }
             }
             if (m.state == MsgState.FAILED && out) {
                 Text(
@@ -885,15 +1027,40 @@ fun MsgRow(m: Msg, peerName: String, onClick: () -> Unit) {
                     modifier = Modifier.clickable(onClick = onClick).padding(top = 2.dp)
                 )
             }
+            // 发出的消息：已发出 / 已送达 / 已读
+            val tick = when {
+                !out -> ""
+                m.state == MsgState.DONE && m.seen -> "已读"
+                m.kind == Kind.TEXT && m.state == MsgState.SENDING -> "发送中"
+                m.kind == Kind.TEXT && m.state == MsgState.WAITING -> "已发出"
+                m.kind == Kind.TEXT && m.state == MsgState.DONE -> "已送达"
+                else -> ""
+            }
+            if (tick.isNotEmpty()) Text(tick, color = if (tick == "已读") Blue2 else Gray, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
         }
         if (out) { Spacer(Modifier.width(8.dp)); Avatar("我") }
     }
+    if (selecting) Box(Modifier.matchParentSize().clickable(onClick = onToggle))
+    }
+}
+
+/** 长按菜单：复制 / 回复 / 转发 / 撤回 / 删除 / 多选 */
+@Composable
+private fun ColumnScope.MsgMenuItems(m: Msg, dismiss: () -> Unit, onAction: (String) -> Unit) {
+    DropdownMenuItem(text = { Text(if (m.kind == Kind.TEXT) "复制" else "复制文件名") }, onClick = { dismiss(); onAction("copy") })
+    DropdownMenuItem(text = { Text("回复") }, onClick = { dismiss(); onAction("quote") })
+    if (m.kind == Kind.TEXT || (m.kind == Kind.FILE && m.uri.isNotEmpty())) {
+        DropdownMenuItem(text = { Text("转发") }, onClick = { dismiss(); onAction("forward") })
+    }
+    if (Hub.canRecall(m)) DropdownMenuItem(text = { Text("撤回") }, onClick = { dismiss(); onAction("recall") })
+    if (!m.active) DropdownMenuItem(text = { Text("删除") }, onClick = { dismiss(); onAction("delete") })
+    DropdownMenuItem(text = { Text("多选") }, onClick = { dismiss(); onAction("select") })
 }
 
 /** 聊天里直接显示图片 / 动图；长按可以“添加到表情” */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
+fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit, onAction: (String) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
@@ -935,6 +1102,7 @@ fun ImageBubble(m: Msg, onClick: () -> Unit, onFail: () -> Unit) {
                     Saver.open(ctx, Uri.parse(m.uri), m.file.ifEmpty { m.name })
                 })
             }
+            MsgMenuItems(m, { menu = false }, onAction)
         }
     }
 }
@@ -955,8 +1123,9 @@ private fun TransferButtons(m: Msg) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FileCard(m: Msg, onClick: () -> Unit) {
+fun FileCard(m: Msg, onClick: () -> Unit, onLong: () -> Unit = {}) {
     val pct = if (m.size > 0) (m.done.toFloat() / m.size).coerceIn(0f, 1f) else 0f
     val status = when (m.state) {
         MsgState.SENDING -> "发送中 ${(pct * 100).toInt()}%"
@@ -967,13 +1136,14 @@ fun FileCard(m: Msg, onClick: () -> Unit) {
         MsgState.FAILED -> if (m.error.isNotEmpty()) "失败：${m.error}" else "失败"
         MsgState.OFFERED -> "待接收"
         MsgState.WAITING -> "等待对方接收"
+        MsgState.RECALLED -> "已撤回"
     }
     val isApk = (m.file.ifEmpty { m.name }).let { it.endsWith(".apk", true) || it.endsWith(".apks", true) }
     val badge = if (m.kind == Kind.APP || isApk) "APK" else m.name.substringAfterLast('.', "FILE").take(4).uppercase()
     val title = if (m.kind == Kind.APP) "${m.name}  ${m.ver}" else m.name
     Surface(
         shape = RoundedCornerShape(18.dp), color = if (m.outgoing) Color(0xFFD9F0FD) else Color.White,
-        modifier = Modifier.width(280.dp).clickable(onClick = onClick)
+        modifier = Modifier.width(280.dp).combinedClickable(onClick = onClick, onLongClick = onLong)
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
