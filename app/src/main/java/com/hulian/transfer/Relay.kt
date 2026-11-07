@@ -454,6 +454,10 @@ object Relay {
 
     /** 界面回到前台：没连上就马上重连，不等退避（事件触发，不是定时） */
     fun onForeground() {
+        // 后台期间网盘那边的空闲连接多半已被系统 / 服务器悄悄断了：回到前台时清掉（只清空闲的，正在传的不受影响），免得第一次请求踩到断连接而失败
+        Hub.scope.launch(Dispatchers.IO) {
+            try { Http.dav.connectionPool.evictAll() } catch (e: Exception) { Hub.log("Relay", e) }
+        }
         if (configured() && !connected.value) kick()
     }
 
@@ -1054,10 +1058,10 @@ object Relay {
             return@withContext
         }
         if (offers.containsKey(mid)) return@withContext   // 已经有张待接收的卡片了，等用户决定
-        if (!processing.add(mid)) {
-            failVisible(mid, "这条消息正在处理中，请稍后再点接收")
-            return@withContext
-        }
+        // 同一条已经有人在处理了（回前台时 Cloudflare 补发的通知和扫描网盘会撞上点“接收”）：重复的这次悄悄退出。
+        // 以前这里会把卡片标成失败，用户就看到“提示失败”
+        if (!processing.add(mid)) return@withContext
+        var again = false
         val lv = live.computeIfAbsent(mid) { Live(fromHint).also { l -> l.optimistic = fromHint == null } }
         var multi: Multi? = null
         // 知道后缀（扫描网盘时、或通知里带了）先试它，找不到（404）再依次试 .dat、.bin（旧版本的发件人没有后缀信息）
@@ -1123,7 +1127,9 @@ object Relay {
             quietDelete(c, path)
             lv.peerId?.let { reportUsage(it, mid) }
         } catch (e: OfferException) {
-            try {
+            // 这次读消息头的过程中用户已经点了“接收”（这是重复的一次扫描 / 补发通知先读到的）：不能再弹新的待接收卡片，
+            // 释放处理权后按“已接收”重新来一遍（见函数末尾）
+            if (accepted.contains(mid)) again = true else try {
                 if (Store.isRecalled(e.meta.optString("cid"))) {
                     // 对方在消息还没来得及显示时就撤回了：不显示，直接清掉网盘上的文件
                     markDone(mid)
@@ -1222,6 +1228,7 @@ object Relay {
             processing.remove(mid)
             live.remove(mid)
         }
+        if (again) Hub.scope.launch { receive(fromHint, mid, ext) }
     }
 
     /** 用户点了“接收”：开始下载。分段文件的后续分段通知在等待期间被忽略了，所以直接去网盘取，不等通知 */
