@@ -165,6 +165,24 @@ object Net {
         false
     }
 
+    /** 发控制消息（已读、撤回…）：成功（对方应答了）返回 true */
+    fun sendCtl(p: Peer, ctl: JSONObject): Boolean = try {
+        if (!p.paired) {
+            false
+        } else {
+            connectTo(p, 900, 2500).use { s ->
+                s.soTimeout = 2500
+                val ch = Wire(s.getInputStream(), s.getOutputStream())
+                ch.write(headerBytes(JSONObject().put("type", "ctl").put("ctl", ctl)))
+                ch.flush()
+                val r = ch.read()
+                r.isNotEmpty() && r[0] == 1.toByte()
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
     /** 通知对方“我退出对话框了”：尽力而为，失败（比如网已经断了）就算了 */
     fun bye(p: Peer) {
         try {
@@ -339,9 +357,14 @@ object Server {
                         if (text.length > MAX_TEXT_LEN) {
                             no(ch, "文字太长")
                         } else {
-                            Inbox.addText(pid, text)
+                            Inbox.addText(pid, text, h.optString("cid"), h.optString("rq"))
                             ok(ch)
                         }
+                    }
+                    "ctl" -> {
+                        // 回执 / 撤回等控制消息（已读、撤回、撤回不了）
+                        h.optJSONObject("ctl")?.let { Hub.onCtl(pid, it) }
+                        ok(ch)
                     }
                     "file" -> receiveFile(pid, h, ch, s)
                     "rk" -> {
