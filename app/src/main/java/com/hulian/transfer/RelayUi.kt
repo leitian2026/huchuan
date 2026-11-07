@@ -218,7 +218,7 @@ private fun RelaySettingsCardBody() {
             SwitchRow("Cloudflare 使用系统 DNS", cfSys, "关闭后只认 Host 映射，没有映射的域名直接连不上，不会用系统 DNS") { cfSys = it }
         }
 
-        FoldSection("网盘", cur.name + " · " + davDir + (if (davDnsSummary.isEmpty()) "" else " · $davDnsSummary"), startOpen = davUser.isBlank() || davPass.isBlank()) {
+        FoldSection("网盘", cur.name + " · " + davDir + (if (davDnsSummary.isEmpty()) "" else " · $davDnsSummary"), startOpen = prov != "cfr2" && (davUser.isBlank() || davPass.isBlank())) {
             // 手机屏幕窄，三个选项一行放不下会把最后一个（自定义）挤出屏幕又划不动：放不下就换行
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 DavProviders.all.forEach { p ->
@@ -227,9 +227,11 @@ private fun RelaySettingsCardBody() {
             }
             NoteText(cur.note + "两台手机要选同一家、填同一个账号。")
             SubTitle("账号")
-            Field(cur.urlLabel, davUrl) { davUrl = it }
-            Field(cur.userLabel, davUser) { davUser = it }
-            Field(cur.passLabel, davPass, secretField = true) { davPass = it }
+            if (prov != "cfr2") {
+                Field(cur.urlLabel, davUrl) { davUrl = it }
+                Field(cur.userLabel, davUser) { davUser = it }
+                Field(cur.passLabel, davPass, secretField = true) { davPass = it }
+            }
             Field("网盘里用的文件夹名", davDir) { davDir = it }
             SubTitle("消息文件后缀")
             NoteText(
