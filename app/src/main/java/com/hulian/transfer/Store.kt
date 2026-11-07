@@ -91,6 +91,17 @@ object Store {
     /** 当前网盘的配置；没填全返回 null */
     val dav: DavConfig?
         get() {
+            if (davProvider == "cfr2") {   // 经 Worker 存取 R2：地址和口令就是“Cloudflare”那一组，不另存密钥
+                val raw = relayUrl.trim().trimEnd('/')
+                val sec = relaySecret
+                if (raw.isEmpty() || sec.isEmpty()) return null
+                val base = when {
+                    raw.startsWith("https://") -> raw
+                    raw.startsWith("wss://") -> "https://" + raw.removePrefix("wss://")
+                    else -> "https://$raw"
+                }
+                return DavConfig("$base/r2", "", sec, davDir.ifBlank { "hulian-relay" }, s3 = true, worker = true)
+            }
             val u = davUrl.trim()
             val n = davUser.trim()
             val p = davPass
