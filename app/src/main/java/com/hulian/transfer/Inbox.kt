@@ -7,8 +7,13 @@ import java.io.IOException
 object Inbox {
     class FileJob(val id: String, val size: Long, val title: String, val isApp: Boolean, val saved: Saver.Out)
 
-    fun addText(pid: String, text: String) {
-        Hub.addMsg(Msg(newId(), pid, false, Kind.TEXT, now(), text = text, read = Hub.isViewing(pid)))
+    /** cid：发送方那边这条消息的 id；重复收到（重发、补发）或对方已经撤回了的不再加一条 */
+    fun addText(pid: String, text: String, cid: String = "", quote: String = "") {
+        if (cid.isNotEmpty()) {
+            if (Store.isRecalled(cid)) return
+            if (Hub.msgs.value.any { it.rid == cid && it.peerId == pid }) return
+        }
+        Hub.addMsg(Msg(newId(), pid, false, Kind.TEXT, now(), text = text, read = Hub.isViewing(pid), rid = cid, quote = quote))
         Notifier.message(pid, text)
     }
 
@@ -34,7 +39,7 @@ object Inbox {
             Hub.patch(id) {
                 it.copy(
                     name = title, file = fname, size = size, state = MsgState.RECEIVING, done = 0L, error = "",
-                    pkg = h.optString("pkg"), ver = h.optString("ver")
+                    pkg = h.optString("pkg"), ver = h.optString("ver"), rid = h.optString("cid"), quote = h.optString("rq")
                 )
             }
         } else {
@@ -42,7 +47,8 @@ object Inbox {
                 Msg(
                     id, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
                     name = title, file = fname, size = size, state = MsgState.RECEIVING,
-                    pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
+                    pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid),
+                    rid = h.optString("cid"), quote = h.optString("rq")
                 )
             )
         }
@@ -68,7 +74,8 @@ object Inbox {
             Msg(
                 mid, pid, false, if (isApp) Kind.APP else Kind.FILE, now(),
                 name = title, file = fname, size = size, state = MsgState.OFFERED,
-                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid)
+                pkg = h.optString("pkg"), ver = h.optString("ver"), read = Hub.isViewing(pid),
+                rid = h.optString("cid"), quote = h.optString("rq")
             )
         )
         Notifier.message(pid, (if (isApp) "发来应用：" else "发来文件：") + title + "（点开选择是否接收）")
