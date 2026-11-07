@@ -16,7 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** s3=true：这是 Cloudflare R2（S3 接口）：url=桶地址，user=Access Key ID，pass=Secret，dir=对象名前缀 */
-class DavConfig(val url: String, val user: String, val pass: String, val dir: String, val s3: Boolean = false)
+class DavConfig(val url: String, val user: String, val pass: String, val dir: String, val s3: Boolean = false, val worker: Boolean = false)
+// worker=true：经自己的 Cloudflare Worker 存取 R2（Worker 绑定了桶），手机上不存 R2 密钥：url=Worker 地址/r2，pass=中转口令；其余和 S3 方式一样（同样的对象名、列表格式）
 
 object Http {
     private fun base(dns: okhttp3.Dns, http1: Boolean = false): OkHttpClient = OkHttpClient.Builder()
@@ -132,7 +133,7 @@ object WebDav {
         throw IOException("${Store.davName}地址格式不对：$u（应该像 ${DavProviders.get(Store.davProvider).urlExample}）", e)
     }
 
-    private fun why(code: Int): String = if (Store.davProvider == "r2") whyR2(code) else when (code) {
+    private fun why(code: Int): String = if (Store.davProvider == "cfr2") whyCfr2(code) else if (Store.davProvider == "r2") whyR2(code) else when (code) {
         401 -> if (Store.davProvider == "jgy") "账号或应用密码不对（坚果云要用“应用密码”，不是登录密码；账号是注册邮箱）"
             else "账号或密码不对（要用网盘里单独生成的 WebDAV / 应用密码，不是登录密码）"
         403 -> "被网盘拒绝（可能是本月上传 / 下载流量用完了、请求太频繁被限制，或没有写入权限）"
@@ -145,6 +146,15 @@ object WebDav {
         507 -> "网盘空间不足"
         in 500..599 -> "网盘服务器出错"
         else -> "网盘返回了意外的状态"
+    }
+
+    private fun whyCfr2(code: Int): String = when (code) {
+        401 -> "Worker 拒绝了：中转口令不对"
+        404 -> "文件不存在（或者 Worker 地址不对、Worker 不是最新版）"
+        413 -> "文件太大，超过了 Worker 单次请求的上限"
+        429 -> "请求太频繁，被 Cloudflare 限速了，请稍后再试"
+        in 500..599 -> "Worker 出错（多半是 Worker 没有绑定 R2 桶：绑定的变量名必须是 BUCKET）"
+        else -> "Worker 返回了意外的状态"
     }
 
     private fun whyR2(code: Int): String = when (code) {
@@ -447,6 +457,13 @@ object DavProviders {
             "Access Key ID（用 API Token 时填 Token 的 ID）",
             "Secret Access Key（用 API Token 时直接填 Token 的值，App 会按官方规则自动取 SHA-256）",
             "走 S3 接口，不是 WebDAV。免费 10GB，出站流量免费，没有坚果云那种请求次数 / 月流量限制，所以不显示额度保护。桶要先在 Cloudflare 里建好；手机时间要准（差 15 分钟以上签名会失效）。"
+        ),
+        DavProvider(
+            "cfr2", "R2（经 Worker）", "", "",
+            "", "", "",
+            "不用填 R2 密钥：文件经你的 Cloudflare Worker 存取 R2，Worker 地址和口令就是上面“Cloudflare”里填的那一组。" +
+                "要先在 Worker 的“绑定”里加一个 R2 桶，变量名必须是 BUCKET，并重新部署最新的 Worker；建议在 R2 桶的“设置 → 对象生命周期”里加一条“7 天后删除对象”，过期文件由 R2 自动清理。" +
+                "出站流量免费，没有请求额度限制，所以不显示额度保护。"
         ),
         DavProvider(
             "custom", "自定义", "", "https://example.com/dav/",
