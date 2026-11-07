@@ -1046,7 +1046,7 @@ object Relay {
     }
 
     /** 收一条：fromHint 是通知里的发送者（扫描网盘时未知，null）。从坚果云下载、解密、记入聊天、删除 */
-    private suspend fun receive(fromHint: String?, mid: String, ext: String? = null) = withContext(Dispatchers.IO) {
+    private suspend fun receive(fromHint: String?, mid: String, ext: String? = null): Unit = withContext(Dispatchers.IO) {
         if (!midPattern.matches(mid)) return@withContext
         if (keepMids.contains(mid) && !accepted.contains(mid)) {   // 失败了在等用户点“重试”：扫描、重复通知都别再弹新的待接收卡片
             live.remove(mid)
