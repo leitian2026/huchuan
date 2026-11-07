@@ -103,6 +103,15 @@ object S3 {
         val hu = try { url.toHttpUrl() } catch (e: IllegalArgumentException) {
             throw IOException("${Store.davName}地址格式不对：$url（应该像 ${DavProviders.get("r2").urlExample}）", e)
         }
+        // 经自己的 Worker 存取 R2：不签名，只带中转口令（Worker 自己绑定了桶）
+        if (c.worker) {
+            return Request.Builder().url(hu)
+                .header("X-Relay-Secret", c.pass)
+                .header("X-Device", Store.deviceId)
+                .method(method, body)
+                .tag(tag)
+                .build()
+        }
         val host = if (hu.port == 443) hu.host else "${hu.host}:${hu.port}"
         val date = now()
         val auth = authorization(
