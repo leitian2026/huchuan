@@ -71,6 +71,15 @@ object Relay {
         }
     }
     /** 一个文件传完上传、通知也发出去了：聊天里显示“等待对方接收”（对方收完会回通知改成“已发送”） */
+    /** 某一段太慢、换连接重试时，在传输卡片上写一句提示；这一段传完就清掉。只在有变化时才更新界面 */
+    private fun slowHint(msgId: String?, text: String) {
+        if (msgId == null) return
+        val cur = Hub.msgs.value.firstOrNull { it.id == msgId } ?: return
+        if (cur.error == text || !(cur.state == MsgState.SENDING || cur.state == MsgState.RECEIVING)) return
+        if (text.isEmpty() && !cur.error.startsWith("第")) return   // 不是这个提示（别的错误信息）不清
+        Hub.patch(msgId) { it.copy(error = text) }
+    }
+
     private fun markWaiting(localId: String?, header: JSONObject) {
         if (localId == null) return
         Hub.patch(localId) {
@@ -715,7 +724,7 @@ object Relay {
             return
         }
         if (open != null && size > psz) {
-            sendParts(peer, header, size, open, onProgress, c, mid, psz, ctl)
+            sendParts(peer, header, size, open, onProgress, c, mid, psz, ctl, localId)
             markWaiting(localId, header)
             return
         }
@@ -793,7 +802,7 @@ object Relay {
      */
     private suspend fun sendParts(
         peer: Peer, header: JSONObject, size: Long, open: () -> InputStream, onProgress: (Long) -> Unit,
-        c: DavConfig, mid: String, psz: Long, ctl: TransferCtl?
+        c: DavConfig, mid: String, psz: Long, ctl: TransferCtl?, localId: String? = null
     ) {
         val n = ((size + psz - 1) / psz).toInt()
         val headExt = Store.relayHeadExt
@@ -857,7 +866,8 @@ object Relay {
                                     if (i >= n) break
                                     // 坚果云额度快满就在这里自动暂停（只拦新的一段，已经在传的传完）
                                     DavQuota.ensureRoom(ctl, minOf(psz, size - i * psz), 0L, 1)
-                                    uploadPart(c, peer, mid, key, headMeta, headExt, i, psz, size, open, sent, lock, onProgress, ctl)
+                                    uploadPart(c, peer, mid, key, headMeta, headExt, i, psz, size, open, sent, lock, onProgress, ctl) { slowHint(localId, "第 ${i + 1} / $n 段较慢，已换连接重试") }
+                                    slowHint(localId, "")
                                     uploaded.add(i)
                                     // 通知放到单独的协程里发，这条分段的“工人”马上去传下一段：
                                     // 以前它要等第 0 段的通知被 Cloudflare 确认（最多十几秒、断线时更久），所有分段都跟着停在原地
@@ -904,7 +914,7 @@ object Relay {
     private suspend fun uploadPart(
         c: DavConfig, peer: Peer, mid: String, key: SecretKeySpec, headMeta: ByteArray, headExt: String,
         i: Int, psz: Long, size: Long, open: () -> InputStream,
-        sent: AtomicLong, lock: Any, onProgress: (Long) -> Unit, ctl: TransferCtl?
+        sent: AtomicLong, lock: Any, onProgress: (Long) -> Unit, ctl: TransferCtl?, onSlow: () -> Unit = {}
     ) {
         val plain = minOf(psz, size - i * psz)
         val meta = if (i == 0) headMeta else JSONObject().put("mid", mid).put("from", Store.deviceId)
@@ -963,6 +973,7 @@ object Relay {
                 synchronized(lock) { sent.addAndGet(-last); onProgress(sent.get()) }
                 if (e is WebDav.SlowException || e.cause is WebDav.SlowException) {
                     slowTries++   // 太慢：马上换新连接重传，不等
+                    onSlow()
                     continue
                 }
                 if (attempt++ < 2) {
@@ -1430,12 +1441,16 @@ object Relay {
                         added += d
                         m.inflight.addAndGet(d)
                         showProgress(m)
-                    }.also { DavQuota.addDown(it.size) }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
+                    }.also {
+                        DavQuota.addDown(it.size)
+                        if (slowTries > 0) slowHint(m.mid, "")
+                    }   // 成功：这些字节留在 inflight 里，写盘时（finishMulti）按原始大小扣掉
                 } catch (e: Exception) {
                     m.inflight.addAndGet(-added)   // 这次没下成：已经算进去的字节撤回
                     if (e is WebDav.SlowException) {
                         m.ctl.check()
                         slowTries++
+                        slowHint(m.mid, "第 ${i + 1} / ${m.n} 段较慢，已换连接重试")
                         continue
                     }
                     if (e is WebDav.DavException && e.code == 404) return null else throw e
