@@ -496,6 +496,10 @@ object Hub {
         touch()
         _msgs.update { it + m }
         persistSoon()
+        // 对方正开着这个聊天时来的消息，一到就是已读：马上补发回执（否则回执只在“未读变已读”时才发，这种情况一条都不会发）
+        if (!m.outgoing && m.read && m.rid.isNotEmpty() && Store.readReceipts) {
+            sendCtl(m.peerId, JSONObject().put("op", "read").put("cids", org.json.JSONArray(listOf(m.rid))))
+        }
     }
 
     fun removeMsg(id: String) {
