@@ -5,7 +5,7 @@ import java.util.UUID
 
 enum class Kind { TEXT, FILE, APP }
 /** OFFERED：远程发来的文件，等本机点“接收”才下载（不写入聊天记录文件，重启后由网盘扫描重新生成） */
-enum class MsgState { SENDING, RECEIVING, PAUSED, DONE, FAILED, CANCELED, OFFERED, WAITING }
+enum class MsgState { SENDING, RECEIVING, PAUSED, DONE, FAILED, CANCELED, OFFERED, WAITING, RECALLED }
 
 data class Peer(
     val id: String,
@@ -37,7 +37,10 @@ data class Msg(
     val pkg: String = "",
     val ver: String = "",
     val error: String = "",
-    val read: Boolean = true    // 收到的消息是否已读（用于未读数）
+    val read: Boolean = true,   // 收到的消息是否已读（用于未读数）
+    val rid: String = "",       // 收到的消息：发送方那边这条消息的 id（回执 / 撤回靠它对上同一条）
+    val quote: String = "",     // 引用回复：被引用那条消息的摘要
+    val seen: Boolean = false   // 发出的消息：对方已读
 )
 
 /** 从系统“分享”菜单收到的待发送内容 */
