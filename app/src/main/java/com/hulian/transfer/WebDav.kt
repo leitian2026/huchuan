@@ -23,9 +23,9 @@ object Http {
     /**
      * 连接池里空闲这么久（秒）的连接自己关掉（OkHttp 默认留 5 分钟）：手机闲置后，网络常悄悄断掉空闲连接，
      * 下一次请求写出去不报错，却要等到读超时（60 秒）才发现。不发心跳，不耗电；传输中的连接不算空闲，分段并行上传不受影响。
-     * client 和 dav 各有一个池；davGet / davPut / ws 是从它们派生的，共用同一个池。
+     * client 和 dav 各有一个池；davGet / davPut / ws 是从它们派生的，共用同一个池。NetDns 里自建 DoH 的客户端也用这个时间，所以不是 private。
      */
-    private const val POOL_IDLE_S = 30L
+    const val POOL_IDLE_S = 30L
 
     private fun base(dns: okhttp3.Dns, http1: Boolean = false): OkHttpClient = OkHttpClient.Builder()
         .dns(dns)

@@ -187,7 +187,10 @@ object NetDns {
         val key = text + "\n" + (if (Store.hostsOn) Store.hostsText else "") + "\n" + sysOk
         dohCache?.let { if (it.first == key) return it.second }
         val hosts = activeHosts()
+        // 连接池里空闲 30 秒的连接自己关（默认 5 分钟）：手机闲置后，网络常悄悄断掉空闲连接，
+        // 闲久了的第一次域名解析会踩到断连接，白等 8 秒读超时。不发心跳，不耗电
         val client = OkHttpClient.Builder()
+            .connectionPool(okhttp3.ConnectionPool(2, Http.POOL_IDLE_S, TimeUnit.SECONDS))
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .build()
