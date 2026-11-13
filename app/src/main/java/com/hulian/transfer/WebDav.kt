@@ -20,8 +20,16 @@ class DavConfig(val url: String, val user: String, val pass: String, val dir: St
 // worker=true：经自己的 Cloudflare Worker 存取 R2（Worker 绑定了桶），手机上不存 R2 密钥：url=Worker 地址/r2，pass=中转口令；其余和 S3 方式一样（同样的对象名、列表格式）
 
 object Http {
+    /**
+     * 连接池里空闲这么久（秒）的连接自己关掉（OkHttp 默认留 5 分钟）：手机闲置后，网络常悄悄断掉空闲连接，
+     * 下一次请求写出去不报错，却要等到读超时（60 秒）才发现。不发心跳，不耗电；传输中的连接不算空闲，分段并行上传不受影响。
+     * client 和 dav 各有一个池；davGet / davPut / ws 是从它们派生的，共用同一个池。
+     */
+    private const val POOL_IDLE_S = 30L
+
     private fun base(dns: okhttp3.Dns, http1: Boolean = false): OkHttpClient = OkHttpClient.Builder()
         .dns(dns)
+        .connectionPool(okhttp3.ConnectionPool(5, POOL_IDLE_S, TimeUnit.SECONDS))
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
